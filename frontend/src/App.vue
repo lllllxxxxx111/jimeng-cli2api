@@ -18,6 +18,7 @@ const successMessage = ref('');
 const authUrlModal = ref('');
 const authModalTitle = ref('');
 const authUrlCopied = ref(false);
+const importUrlCopied = ref(false);
 const apiKeyResult = ref('');
 const apiKeyOwner = ref('');
 const apiKeyQuota = ref<number | null>(null);
@@ -28,7 +29,7 @@ const rebindModal = ref<{ show: boolean; keyId: string; keyOwner: string; curren
 const rebindNewAccountId = ref<string>('');
 const checkingId = ref<string | null>(null);
 const reloginLoadingId = ref<string | null>(null);
-const importLoginModal = ref<{ show: boolean; accountId: string; accountName: string }>({ show: false, accountId: '', accountName: '' });
+const importLoginModal = ref<{ show: boolean; accountId: string; accountName: string; importUrl: string }>({ show: false, accountId: '', accountName: '', importUrl: '' });
 const importLoginJson = ref('');
 const importLoginLoading = ref(false);
 
@@ -84,6 +85,23 @@ const copyAuthUrl = async () => {
   }
 };
 
+const copyImportUrl = async () => {
+  const url = importLoginModal.value.importUrl;
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    const el = document.createElement('textarea');
+    el.value = url;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+  }
+  importUrlCopied.value = true;
+  setTimeout(() => { importUrlCopied.value = false; }, 2000);
+};
+
 const doUpdatePassword = async () => {
   try {
     const res = await fetch('/admin/sys/password', {
@@ -130,14 +148,23 @@ const fetchAccounts = async () => {
 
 const checkAccount = async (id: string) => {
   checkingId.value = id;
+  errorMessage.value = '';
   try {
     const res = await authFetch(`/admin/accounts/${id}/check`, { method: 'POST' });
     const data = await res.json();
     if (res.ok && data.account) {
       const index = accounts.value.findIndex((a: any) => a.id === id);
       if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
+      successMessage.value = `账号状态已刷新：${data.account.name}`;
+    } else {
+      if (data.account) {
+        const index = accounts.value.findIndex((a: any) => a.id === id);
+        if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
+      }
+      errorMessage.value = data.error || `检测账号 ${id} 状态失败`;
     }
-  } catch (e) {
+  } catch (e: any) {
+    errorMessage.value = `检测账号 ${id} 状态失败: ${e.message}`;
     console.error(`检测账号 ${id} 状态失败:`, e);
   } finally {
     checkingId.value = null;
@@ -160,19 +187,12 @@ const setupNewAccount = async () => {
     if (!res.ok) {
       errorMessage.value = data.error || "发生了未知异常";
     } else {
-      if (data.authUrl) {
-        authUrlModal.value = data.authUrl;
-        authModalTitle.value = `新账号 "${name}" — 请扫码/访问授权链接`;
-      } else if (data.loginOutput) {
-        const urlMatch = data.loginOutput.match(/(https?:\/\/[^\s]+)/);
-        if (urlMatch) {
-          authUrlModal.value = urlMatch[1];
-          authModalTitle.value = `新账号 "${name}" — 请扫码/访问授权链接`;
-        } else {
-          errorMessage.value = "未找到授权 URL！完整输出: " + data.loginOutput;
-        }
+      const importUrl = data.importUrl || '';
+      if (data.account?.id && importUrl) {
+        importLoginJson.value = '';
+        importLoginModal.value = { show: true, accountId: data.account.id, accountName: name, importUrl };
       } else {
-        successMessage.value = "账号已部署完成！";
+        errorMessage.value = '未获取到专用导入链接，请重试部署账号。';
       }
     }
     await fetchAccounts();
@@ -190,9 +210,9 @@ const reloginAccount = async (id: string, name: string) => {
   try {
     const res = await authFetch(`/admin/accounts/${id}/relogin`, { method: 'POST' });
     const data = await res.json();
-    if (res.ok && data.authUrl) {
-      authUrlModal.value = data.authUrl;
-      authModalTitle.value = `账号 "${name}" — 请扫码/访问授权链接`;
+    if (res.ok && data.importUrl) {
+      importLoginJson.value = '';
+      importLoginModal.value = { show: true, accountId: id, accountName: name, importUrl: data.importUrl };
     } else {
       errorMessage.value = data.error || "重新授权失败";
     }
@@ -203,9 +223,21 @@ const reloginAccount = async (id: string, name: string) => {
   }
 };
 
-const openImportLogin = (acc: any) => {
+const openImportLogin = async (acc: any) => {
   importLoginJson.value = '';
-  importLoginModal.value = { show: true, accountId: acc.id, accountName: acc.name };
+  importUrlCopied.value = false;
+  errorMessage.value = '';
+  try {
+    const res = await authFetch(`/admin/accounts/${acc.id}/login-context`);
+    const data = await res.json();
+    if (!res.ok) {
+      errorMessage.value = data.error || '未找到登录上下文';
+      return;
+    }
+    importLoginModal.value = { show: true, accountId: acc.id, accountName: acc.name, importUrl: data.importUrl || '' };
+  } catch (e: any) {
+    errorMessage.value = '读取登录上下文失败: ' + e.message;
+  }
 };
 
 const doImportLogin = async () => {
@@ -410,10 +442,17 @@ onMounted(() => {
           <h3 class="font-extrabold text-xl text-slate-800">📥 JSON 导入登录态</h3>
           <p class="text-sm text-slate-600">账号：<span class="font-bold">{{ importLoginModal.accountName }}</span></p>
           <ol class="text-xs text-slate-500 space-y-1 list-decimal list-inside">
-            <li>先登录即梦：<a href="https://jimeng.jianying.com/ai-tool/login" target="_blank" class="text-indigo-500 underline">https://jimeng.jianying.com/ai-tool/login</a></li>
-            <li>然后打开（用 random_secret_key 替换）：<br><span class="font-mono break-all">https://jimeng.jianying.com/dreamina/cli/v1/dreamina_cli_login?aid=513695&random_secret_key=<b>KEY</b>&web_version=7.5.0</span></li>
-            <li>复制页面全部 JSON，粘贴到下方</li>
+            <li>直接打开下方“当前账号专用导入链接”（若浏览器未登录会自动跳转登录）</li>
+            <li>页面返回完整 JSON 后，复制并粘贴到下方</li>
+            <li>点击“确认导入”完成绑定</li>
           </ol>
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-3">
+            <div class="flex items-center justify-between gap-3 mb-2">
+              <p class="text-xs font-bold text-slate-600">当前账号专用导入链接</p>
+              <button @click="copyImportUrl" class="text-xs border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 font-bold px-2 py-1 rounded-lg">{{ importUrlCopied ? '已复制' : '复制链接' }}</button>
+            </div>
+            <a :href="importLoginModal.importUrl" target="_blank" class="block break-all text-indigo-600 text-xs font-mono leading-5">{{ importLoginModal.importUrl }}</a>
+          </div>
           <textarea v-model="importLoginJson" rows="8" class="w-full border border-slate-300 rounded-xl p-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none" placeholder='粘贴完整 JSON...'></textarea>
           <div class="flex gap-3">
             <button @click="importLoginModal.show = false" class="flex-1 border border-slate-300 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-50">取消</button>
