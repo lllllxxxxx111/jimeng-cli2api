@@ -45,11 +45,13 @@ model Task {
   account         JimengAccount? @relation(fields: [accountId], references: [id])
   
   type            String   // text2image, text2video
+  model           String?  // e.g. "seedance2.0", "3.5pro", "5.0"
   prompt          String
   jimengSubmitId  String?  // The native submit_id from CLI
   status          String   @default("PENDING") // PENDING, PROCESSING, SUCCESS, FAILED 
   resultUrl       String?  // The final outcome URL
-  errorMsg        String?
+  errorMsg        String?  // 火山明确返回的失败原因
+  pollErrorMsg    String?  // 我方轮询网络异常信息（不代表任务失败，任务仍在火山排队）
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

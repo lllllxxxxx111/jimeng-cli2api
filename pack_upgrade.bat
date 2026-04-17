@@ -45,6 +45,8 @@ robocopy "%ROOT%bin" "%PAYLOAD_DIR%\bin" /e /njh /njs /ndl >nul
 copy "%ROOT%package.json" "%PAYLOAD_DIR%\" >nul
 copy "%ROOT%package-lock.json" "%PAYLOAD_DIR%\" >nul
 copy "%ROOT%start.bat" "%PAYLOAD_DIR%\" >nul
+copy "%ROOT%test_client.html" "%PAYLOAD_DIR%\" >nul
+if exist "%ROOT%docs" robocopy "%ROOT%docs" "%PAYLOAD_DIR%\docs" /e /njh /njs /ndl >nul
 copy "%ROOT%upgrade_apply.bat" "%PACK_DIR%\" >nul
 
 (
@@ -52,7 +54,8 @@ copy "%ROOT%upgrade_apply.bat" "%PACK_DIR%\" >nul
 	echo 1. 将 jimeng-upgrade.zip 解压到服务器任意临时目录。
 	echo 2. 运行 upgrade_apply.bat。
 	echo 3. 输入服务器现有安装目录，例如 E:\jimeng-deploy。
-	echo 4. 脚本只覆盖程序文件，不会碰 data 目录和数据库。
+	echo 4. 脚本只覆盖程序文件，不会碰 data 目录和 jimeng.db 数据库文件。
+	echo 5. 脚本会自动执行 prisma migrate deploy，安全升级数据库结构（只加字段，不删数据）。
 ) > "%PACK_DIR%\README.txt"
 
 echo [→] 压缩为 jimeng-upgrade.zip...

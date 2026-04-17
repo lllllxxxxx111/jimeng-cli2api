@@ -41,6 +41,22 @@ app.use('/v1', openaiMediaRoutes);
 // 对内提供管理 API
 app.use('/admin', adminRoutes);
 
+// API 错误统一返回 JSON，避免前端解析到 HTML 错页
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!err) {
+    return next();
+  }
+
+  const status = err.status || err.statusCode || 500;
+  const message = err.message || 'Internal server error';
+
+  if (req.path.startsWith('/v1') || req.path.startsWith('/admin')) {
+    return res.status(status).json({ error: { message } });
+  }
+
+  return res.status(status).send(message);
+});
+
 // 简单心跳路由
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '1.0.0' });

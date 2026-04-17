@@ -39,6 +39,18 @@ app.use('/v1', openai_1.default);
 app.use('/v1', openai_media_1.default);
 // 对内提供管理 API
 app.use('/admin', admin_1.default);
+// API 错误统一返回 JSON，避免前端解析到 HTML 错页
+app.use((err, req, res, next) => {
+    if (!err) {
+        return next();
+    }
+    const status = err.status || err.statusCode || 500;
+    const message = err.message || 'Internal server error';
+    if (req.path.startsWith('/v1') || req.path.startsWith('/admin')) {
+        return res.status(status).json({ error: { message } });
+    }
+    return res.status(status).send(message);
+});
 // 简单心跳路由
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', version: '1.0.0' });
