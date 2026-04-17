@@ -36,6 +36,22 @@ if %errorlevel% neq 0 (
 for /f "tokens=*" %%v in ('node --version') do set NODE_VER=%%v
 echo [✓] Node.js %NODE_VER%
 
+:: ── 1.5 自动下载最新版即梦 CLI ─────────────────────
+echo [→] 检查官方即梦 CLI 是否存在...
+if not exist "%~dp0bin\dreamina.exe" (
+    echo [!] 未检测到即梦 CLI (dreamina.exe)，正在从官方自动下载...
+    if not exist "%~dp0bin" mkdir "%~dp0bin"
+    powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://sf3-cn.feishucdn.com/obj/ies-hotsoon-draft/dreamina_installer/dreamina.exe' -OutFile '%~dp0bin\dreamina.exe' -UseBasicParsing"
+    if not exist "%~dp0bin\dreamina.exe" (
+        echo [错误] 即梦 CLI 下载失败，请手动前往官方文档获取并放入 bin 目录。
+        pause
+        exit /b 1
+    )
+    echo [✓] 即梦 CLI 下载完成！
+) else (
+    echo [✓] 即梦 CLI 已就绪
+)
+
 :: ── 2. 初始化/迁移数据库 ─────────────────────
 echo [→] 初始化数据库...
 cd /d "%~dp0"

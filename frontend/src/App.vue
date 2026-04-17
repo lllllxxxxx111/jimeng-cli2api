@@ -410,7 +410,7 @@ onMounted(() => {
 
   <div v-else class="flex min-h-screen bg-[#f8fafc] text-slate-800">
     <aside class="w-64 bg-slate-900 text-white flex flex-col shadow-2xl z-10 p-6 shrink-0">
-      <h1 class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400 mb-8">Dreamina Hub</h1>
+      <h1 class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400 mb-8">即梦Cli_api</h1>
       <nav class="flex-1 space-y-2">
         <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">内部账号池</button>
         <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 令牌分发</button>
@@ -627,7 +627,7 @@ onMounted(() => {
       <!-- ========== TAB: DOCS ========== -->
       <div v-if="currentTab === 'docs'" class="space-y-8">
         <div>
-          <h2 class="text-3xl font-black text-slate-800">即梦 (Dreamina) API 集成文档</h2>
+          <h2 class="text-3xl font-black text-slate-800">即梦Cli_api 集成文档</h2>
           <p class="text-slate-500 mt-1">企业级封装 • 兼容 OpenAI 格式 • 原生多模态</p>
         </div>
         <div class="bg-amber-50 border border-amber-200 rounded-2xl p-6">

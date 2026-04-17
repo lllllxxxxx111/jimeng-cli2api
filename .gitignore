@@ -1,8 +1,37 @@
 node_modules
+node_modules_prod/
+
 # Keep environment variables out of version control
 .env
+.env.*
 
 /generated/prisma
 
-# CLI binary (platform-specific, deploy separately)
+# CLI binary (platform-specific, deploy separately, do NOT commit official assets)
 /bin/
+
+# Application Data & Database
+/data/
+jimeng.db
+jimeng.db-journal
+
+# Official Docs (Excluded to avoid copyright issues)
+/docs/即梦CLI体验指南.md
+/docs/seedance2.0使用限制.md
+
+# AI Communication Process Docs (Never upload to GitHub)
+/ai_docs/
+
+# Temporary files & Uploads
+/temp_uploads/
+/temp_inputs/
+/logs/
+*.log
+
+# Build output
+/dist/
+/build/
+
+# OS/Editor
+.DS_Store
+.vscode/

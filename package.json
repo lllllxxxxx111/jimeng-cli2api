@@ -1,7 +1,7 @@
 {
   "name": "jimengcli_api",
   "version": "1.0.0",
-  "description": "",
+  "description": "即梦的CLI转为标准API调用，快速通过API接入自己工作流，支持seedance2.0 VIP 接入！",
   "main": "index.js",
   "directories": {
     "doc": "docs"
@@ -12,9 +12,15 @@
     "build": "tsc",
     "start": "node dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "jimeng",
+    "cli",
+    "api",
+    "wrapper",
+    "seedance2.0"
+  ],
+  "author": "XiaoYue <43854695@qq.com>",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^5.22.0",
