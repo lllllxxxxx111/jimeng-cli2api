@@ -5,10 +5,10 @@ title 即梦 - 打包升级包（独立升级）
 set "ROOT=%~dp0"
 set "PACK_DIR=%ROOT%_upgrade_temp"
 set "PAYLOAD_DIR=%PACK_DIR%\payload"
-set "OUT_ZIP=%ROOT%jimeng-upgrade.zip"
+set "OUT_ZIP=%ROOT%jimeng-upgrade-v2.0.0.zip"
 
 echo ============================================
-echo   即梦 OpenAI 调度服务 - 升级包
+echo   即梦 OpenAI 调度服务 - 升级包 v2.0.0
 echo ============================================
 echo.
 
@@ -51,19 +51,19 @@ copy "%ROOT%upgrade_apply.bat" "%PACK_DIR%\" >nul
 
 (
 	echo 升级包说明：
-	echo 1. 将 jimeng-upgrade.zip 解压到服务器任意临时目录。
+	echo 1. 将 jimeng-upgrade-v2.0.0.zip 解压到服务器任意临时目录。
 	echo 2. 运行 upgrade_apply.bat。
 	echo 3. 输入服务器现有安装目录，例如 E:\jimeng-deploy。
 	echo 4. 脚本只覆盖程序文件，不会碰 data 目录和 jimeng.db 数据库文件。
 	echo 5. 脚本会自动执行 prisma migrate deploy，安全升级数据库结构（只加字段，不删数据）。
 ) > "%PACK_DIR%\README.txt"
 
-echo [→] 压缩为 jimeng-upgrade.zip...
+echo [→] 压缩为 jimeng-upgrade-v2.0.0.zip...
 powershell -NoProfile -Command "Compress-Archive -Path '%PACK_DIR%\*' -DestinationPath '%OUT_ZIP%' -Force"
 
 echo [→] 清理临时目录...
 rmdir /s /q "%PACK_DIR%"
 
 echo.
-echo [✓] 升级包完成：jimeng-upgrade.zip
+echo [✓] 升级包完成：jimeng-upgrade-v2.0.0.zip
 echo     完整包 pack.bat 未修改；该升级包不包含 data 目录
