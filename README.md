@@ -12,7 +12,10 @@
 
 要想让这个 API 跑起来，底层依赖 **「官方即梦 CLI」**。
 
-👉 **[点击这里查看官方即梦 CLI 下载与介绍文档](https://bytedance.larkoffice.com/wiki/FVTwwm0bGiishxkKOoScdHR2nsg)**
+> ⚠️ **CLI 版本要求：请使用 `dreamina.exe` / `dreamina` **v1.4.2 或以上版本**。**  
+> 新版 CLI 将 submit_id 从旧版 16 位 hex 升级为 UUID 格式，本项目 v2.0.0 起完整适配新格式。  
+> 旧版 CLI 与当前轮询逻辑**不兼容**，会导致任务状态永远无法更新。  
+> 下载地址：👉 [官方即梦 CLI 下载文档](https://bytedance.larkoffice.com/wiki/FVTwwm0bGiishxkKOoScdHR2nsg)
 
 由于大家用的电脑和系统不一样，下面分为 **Windows 快速部署** 和 **Linux 服务器部署**。
 
@@ -85,6 +88,13 @@
 * `docs/`: 存放详尽的开发与接入文档，例如《API集成文档.md》与《即梦CLI体验指南》。
 
 ## 🔄 更新日志 (Changelog)
+
+**v2.0.0 (2026-04-24)**
+- 🔧 **[核心] 适配即梦 CLI v1.4.2**：新版 CLI 将 submit_id 从 16 位 hex 升级为 UUID 格式，本版本完整适配，旧格式作 fallback 兼容。
+- 🔧 **logid 持久化**：任务提交时同步提取并保存 CLI 返回的 logid，便于问题追踪。
+- 🗄️ **数据库新增 `jimengLogId` 字段**，升级包含自动迁移脚本。
+- 🆕 **管理后台「任务管理」分页**：查看/筛选所有任务，支持强制失败、重试、详情弹窗（submit_id / logid 可复制）。
+- 🆕 **24h 超时自动失败**：PROCESSING 超过 24 小时的任务在下次轮询时自动标记 FAILED。
 
 **v1.0.1 (2026-04-20)**
 - 🐛 **Bug修复**：修复了 OpenAI 格式生视频接口中，当仅上传图片（无音视频附件）并指定 seedance2.0 等多模态模型时，因附件类型判定错误导致路由掉入普通多帧/单图模式（默认 3.0 fast）的问题。现在只要指定了多模态模型，将强制且正确地自动路由至多模态通道，极大提升了 API 的模型兼容性与调度准确度。

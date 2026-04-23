@@ -14,6 +14,11 @@ This project aims to transform the underlying CLI commands of Bytedance's Jimeng
 
 To get this API running, it fundamentally relies on the **"Official Jimeng CLI"**.
 
+> ⚠️ **CLI Version Requirement: Use `dreamina.exe` / `dreamina` **v1.4.2 or above**.**  
+> Starting from v1.4.2, the CLI upgraded submit_id from the old 16-char hex format to standard UUID. This project (v2.0.0+) is fully adapted to the new format.  
+> Using an older CLI will cause task polling to **permanently fail** — tasks will never move from PROCESSING.  
+> Download: 👉 [Official Jimeng CLI Docs](https://bytedance.larkoffice.com/wiki/FVTwwm0bGiishxkKOoScdHR2nsg)
+
 ### 💻 Windows One-Click Deployment
 
 **Batch Scripts**:
@@ -77,6 +82,13 @@ Key features of the dashboard:
 * `docs/`: Guides and manuals.
 
 ## 🔄 Changelog
+
+**v2.0.0 (2026-04-24)**
+- 🔧 **[Core] Adapted to Jimeng CLI v1.4.2**: The new CLI upgraded submit_id from 16-char hex to UUID format. This release fully supports the new format with fallback for legacy IDs.
+- 🔧 **logid persistence**: logid returned by CLI is now extracted and saved to the database on task submission for better traceability.
+- 🗄️ **New `jimengLogId` DB field** with auto-migration included in upgrade package.
+- 🆕 **Admin "Task Management" tab**: view/filter all tasks, force-fail stuck tasks, retry failed tasks, copy submit_id / logid from detail modal.
+- 🆕 **24h auto-fail**: PROCESSING tasks older than 24h are automatically marked FAILED on the next polling cycle.
 
 **v1.0.1 (2026-04-20)**
 - 🐛 **Bug Fix**: Fixed a multimodal routing bug in the OpenAI standard video generation API. When only images (without audio/video files) were uploaded and a multimodal model like `seedance2.0` was specified, the router incorrectly fell back to the standard multiframe/single-image mode (resulting in `3.0 fast`). The logic now strictly adheres to the requested model, enforcing the multimodal generation channel regardless of the attachment types, greatly improving API compatibility and scheduling accuracy.
