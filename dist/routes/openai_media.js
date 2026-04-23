@@ -44,6 +44,7 @@ const dispatchJimengTask = async (req, res, type, commandBuilder, tempFilePath =
     let submitId = "";
     try {
         const { stdout } = await (0, cliRunner_1.runJimengCommand)(command, account.homeDir);
+        let logId = null;
         try {
             const jsonStr = stdout.substring(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1);
             const result = JSON.parse(jsonStr);
@@ -53,6 +54,7 @@ const dispatchJimengTask = async (req, res, type, commandBuilder, tempFilePath =
                 submitId = result.task_id;
             else if (result.data?.submit_id)
                 submitId = result.data.submit_id;
+            logId = result.logid || result.log_id || result.data?.logid || null;
         }
         catch (parseErr) { }
         if (!submitId) {
@@ -67,9 +69,14 @@ const dispatchJimengTask = async (req, res, type, commandBuilder, tempFilePath =
                     throw new Error("Cannot find submit_id in CLI output.\nRaw: " + stdout.substring(0, 500));
             }
         }
+        if (!logId) {
+            const logMatch = stdout.match(/logid["':\s=]+([a-zA-Z0-9_\-]+)/i);
+            if (logMatch && logMatch[1])
+                logId = logMatch[1];
+        }
         await prisma.task.update({
             where: { id: dbTask.id },
-            data: { status: 'PROCESSING', jimengSubmitId: submitId }
+            data: { status: 'PROCESSING', jimengSubmitId: submitId, jimengLogId: logId }
         });
     }
     catch (cmdErr) {

@@ -365,22 +365,32 @@ const apiKeyAuth = async (req: Request, res: Response, next: any) => {
   next();
 };
 
-function extractSubmitId(stdout: string): string {
+function extractSubmitInfo(stdout: string): { submitId: string; logId: string | null } {
+  let submitId = '';
+  let logId: string | null = null;
   try {
     const jsonStr = stdout.substring(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1);
     const result = JSON.parse(jsonStr);
-    if (result.submit_id) return result.submit_id;
-    if (result.task_id) return result.task_id;
-    if (result.data?.submit_id) return result.data.submit_id;
+    submitId = result.submit_id || result.task_id || result.data?.submit_id || '';
+    logId = result.logid || result.log_id || result.data?.logid || null;
   } catch (e) {}
 
-  const idMatch = stdout.match(/(?:submit_id|task_id|tid|id)["':\s=]+([a-zA-Z0-9_\-]+)/i);
-  if (idMatch && idMatch[1]) return idMatch[1];
+  if (!submitId) {
+    const idMatch = stdout.match(/(?:submit_id|task_id|tid|id)["':\s=]+([a-zA-Z0-9_\-]+)/i);
+    if (idMatch && idMatch[1]) submitId = idMatch[1];
+    else {
+      const plainMatch = stdout.match(/\b([a-fA-F0-9]{16})\b/);
+      if (plainMatch && plainMatch[1]) submitId = plainMatch[1];
+      else throw new Error("Cannot find submit_id in CLI output.\nRaw Output: " + stdout.substring(0, 500));
+    }
+  }
 
-  const plainMatch = stdout.match(/\b([a-fA-F0-9]{16})\b/);
-  if (plainMatch && plainMatch[1]) return plainMatch[1];
+  if (!logId) {
+    const logMatch = stdout.match(/logid["':\s=]+([a-zA-Z0-9_\-]+)/i);
+    if (logMatch && logMatch[1]) logId = logMatch[1];
+  }
 
-  throw new Error("Cannot find submit_id in CLI output.\nRaw Output: " + stdout.substring(0, 500));
+  return { submitId, logId };
 }
 
 router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async (req: Request, res: Response) => {
@@ -436,8 +446,9 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
     let submitId = "";
     try {
       const { stdout } = await runJimengCommand(command, account.homeDir);
-      submitId = extractSubmitId(stdout);
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'PROCESSING', jimengSubmitId: submitId } });
+      const info = extractSubmitInfo(stdout);
+      submitId = info.submitId;
+      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'PROCESSING', jimengSubmitId: submitId, jimengLogId: info.logId } });
     } catch (cmdErr: any) {
       await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'FAILED', errorMsg: cmdErr.message } });
       const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');
@@ -630,8 +641,9 @@ router.post('/videos/generations', apiKeyAuth, upload.fields([{ name: 'image', m
     let submitId = "";
     try {
       const { stdout } = await runJimengCommand(command, account.homeDir);
-      submitId = extractSubmitId(stdout);
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'PROCESSING', jimengSubmitId: submitId } });
+      const info = extractSubmitInfo(stdout);
+      submitId = info.submitId;
+      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'PROCESSING', jimengSubmitId: submitId, jimengLogId: info.logId } });
     } catch (cmdErr: any) {
       await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'FAILED', errorMsg: cmdErr.message } });
       const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');

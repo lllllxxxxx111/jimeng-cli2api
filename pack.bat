@@ -91,4 +91,3 @@ call npm install >nul 2>&1
 echo.
 echo [✓] 打包完成：jimengCli_api-v1.0.1-windows-x64.zip
 echo     解压到目标机器，双击 start.bat 即可直接启动（无需构建）
-pause

@@ -15,10 +15,10 @@ const apikeys = ref<any[]>([]);
 const loading = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
-const authUrlModal = ref('');
-const authModalTitle = ref('');
-const authUrlCopied = ref(false);
-const importUrlCopied = ref(false);
+const oauthModal = ref<{show:boolean;accountId:string;accountName:string;verificationUri:string;userCode:string;deviceCode:string;expiresAt:string;isNewAccount:boolean}>({ show:false, accountId:'', accountName:'', verificationUri:'', userCode:'', deviceCode:'', expiresAt:'', isNewAccount:false });
+const checkLoginLoading = ref(false);
+const userCodeCopied = ref(false);
+const verificationUriCopied = ref(false);
 const apiKeyResult = ref('');
 const apiKeyOwner = ref('');
 const apiKeyQuota = ref<number | null>(null);
@@ -29,9 +29,18 @@ const rebindModal = ref<{ show: boolean; keyId: string; keyOwner: string; curren
 const rebindNewAccountId = ref<string>('');
 const checkingId = ref<string | null>(null);
 const reloginLoadingId = ref<string | null>(null);
-const importLoginModal = ref<{ show: boolean; accountId: string; accountName: string; importUrl: string }>({ show: false, accountId: '', accountName: '', importUrl: '' });
-const importLoginJson = ref('');
-const importLoginLoading = ref(false);
+
+// ── 任务管理 ──
+const tasks = ref<any[]>([]);
+const taskTotal = ref(0);
+const taskPage = ref(1);
+const taskLimit = 20;
+const taskFilterStatus = ref('');
+const taskLoading = ref(false);
+const taskDetail = ref<any>(null);
+const failReason = ref('');
+const failingId = ref<string | null>(null);
+const retryingId = ref<string | null>(null);
 
 const currentTab = ref('accounts');
 
@@ -67,40 +76,39 @@ const doLogout = () => {
   localStorage.removeItem('admin_token');
 };
 
-const copyAuthUrl = async () => {
+const copyVerificationUri = async () => {
+  const uri = oauthModal.value.verificationUri;
   try {
-    await navigator.clipboard.writeText(authUrlModal.value);
-    authUrlCopied.value = true;
-    setTimeout(() => { authUrlCopied.value = false; }, 2000);
+    await navigator.clipboard.writeText(uri);
   } catch {
-    // 降级：选中文本
     const el = document.createElement('textarea');
-    el.value = authUrlModal.value;
+    el.value = uri;
     document.body.appendChild(el);
     el.select();
     document.execCommand('copy');
     document.body.removeChild(el);
-    authUrlCopied.value = true;
-    setTimeout(() => { authUrlCopied.value = false; }, 2000);
   }
+  verificationUriCopied.value = true;
+  setTimeout(() => { verificationUriCopied.value = false; }, 2000);
 };
 
-const copyImportUrl = async () => {
-  const url = importLoginModal.value.importUrl;
-  if (!url) return;
+const copyUserCode = async () => {
+  const code = oauthModal.value.userCode;
   try {
-    await navigator.clipboard.writeText(url);
+    await navigator.clipboard.writeText(code);
   } catch {
     const el = document.createElement('textarea');
-    el.value = url;
+    el.value = code;
     document.body.appendChild(el);
     el.select();
     document.execCommand('copy');
     document.body.removeChild(el);
   }
-  importUrlCopied.value = true;
-  setTimeout(() => { importUrlCopied.value = false; }, 2000);
+  userCodeCopied.value = true;
+  setTimeout(() => { userCodeCopied.value = false; }, 2000);
 };
+
+
 
 const doUpdatePassword = async () => {
   try {
@@ -174,7 +182,6 @@ const checkAccount = async (id: string) => {
 const setupNewAccount = async () => {
   errorMessage.value = '';
   successMessage.value = '';
-  authUrlModal.value = '';
   const name = prompt("请输入新账号的名称 (例如: vip_account_1):");
   if (!name) return;
   loading.value = true;
@@ -186,14 +193,10 @@ const setupNewAccount = async () => {
     const data = await res.json();
     if (!res.ok) {
       errorMessage.value = data.error || "发生了未知异常";
+    } else if (data.account?.id && data.verificationUri) {
+      oauthModal.value = { show: true, accountId: data.account.id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: true };
     } else {
-      const importUrl = data.importUrl || '';
-      if (data.account?.id && importUrl) {
-        importLoginJson.value = '';
-        importLoginModal.value = { show: true, accountId: data.account.id, accountName: name, importUrl };
-      } else {
-        errorMessage.value = '未获取到专用导入链接，请重试部署账号。';
-      }
+      errorMessage.value = '未获取到 OAuth 授权信息，请重试。';
     }
     await fetchAccounts();
   } catch (error: any) {
@@ -203,16 +206,30 @@ const setupNewAccount = async () => {
   }
 };
 
+const deleteAccount = async (id: string, name: string) => {
+  if (!confirm(`确认删除账号「${name}」？\n此操作将同时删除本地 homeDir 目录，不可恢复。`)) return;
+  try {
+    const res = await authFetch(`/admin/accounts/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok) {
+      successMessage.value = `账号「${name}」已删除`;
+      await fetchAccounts();
+    } else {
+      errorMessage.value = data.error || '删除失败';
+    }
+  } catch (e: any) {
+    errorMessage.value = `删除失败: ${e.message}`;
+  }
+};
+
 const reloginAccount = async (id: string, name: string) => {
   reloginLoadingId.value = id;
-  authUrlModal.value = '';
   errorMessage.value = '';
   try {
     const res = await authFetch(`/admin/accounts/${id}/relogin`, { method: 'POST' });
     const data = await res.json();
-    if (res.ok && data.importUrl) {
-      importLoginJson.value = '';
-      importLoginModal.value = { show: true, accountId: id, accountName: name, importUrl: data.importUrl };
+    if (res.ok && data.verificationUri) {
+      oauthModal.value = { show: true, accountId: id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: false };
     } else {
       errorMessage.value = data.error || "重新授权失败";
     }
@@ -223,44 +240,48 @@ const reloginAccount = async (id: string, name: string) => {
   }
 };
 
-const openImportLogin = async (acc: any) => {
-  importLoginJson.value = '';
-  importUrlCopied.value = false;
-  errorMessage.value = '';
-  try {
-    const res = await authFetch(`/admin/accounts/${acc.id}/login-context`);
-    const data = await res.json();
-    if (!res.ok) {
-      errorMessage.value = data.error || '未找到登录上下文';
-      return;
-    }
-    importLoginModal.value = { show: true, accountId: acc.id, accountName: acc.name, importUrl: data.importUrl || '' };
-  } catch (e: any) {
-    errorMessage.value = '读取登录上下文失败: ' + e.message;
+
+// 关闭 OAuth 弹窗：若是新账号（未完成授权）则同时删除该账号和 homeDir
+const closeOAuthModal = async () => {
+  const { isNewAccount, accountId, accountName } = oauthModal.value;
+  oauthModal.value.show = false;
+  if (isNewAccount && accountId) {
+    try {
+      await authFetch(`/admin/accounts/${accountId}`, { method: 'DELETE' });
+      successMessage.value = `已取消账号「${accountName}」的创建。`;
+    } catch {}
+    await fetchAccounts();
   }
 };
 
-const doImportLogin = async () => {
-  if (!importLoginJson.value.trim()) return alert('请粘贴 JSON 内容');
-  importLoginLoading.value = true;
+const doCheckLogin = async () => {
+  if (!oauthModal.value.deviceCode) return alert('deviceCode 丢失，请重新点击"重新授权"。');
+  checkLoginLoading.value = true;
   errorMessage.value = '';
   try {
-    const res = await authFetch(`/admin/accounts/${importLoginModal.value.accountId}/import-login`, {
+    const res = await authFetch(`/admin/accounts/${oauthModal.value.accountId}/checklogin`, {
       method: 'POST',
-      body: JSON.stringify({ loginJson: importLoginJson.value.trim() })
+      body: JSON.stringify({ deviceCode: oauthModal.value.deviceCode })
     });
     const data = await res.json();
+    if (res.status === 202 && data.pending) {
+      alert('您尚未在浏览器完成授权，请先打开授权链接完成验证后再点击确认。');
+      return;
+    }
     if (res.ok && data.success) {
-      successMessage.value = `账号 "${importLoginModal.value.accountName}" 登录态导入成功！`;
-      importLoginModal.value.show = false;
+      successMessage.value = `账号 "${oauthModal.value.accountName}" 授权成功！`;
+      oauthModal.value.show = false;
       await fetchAccounts();
     } else {
-      errorMessage.value = data.error || '导入失败';
+      // 授权失败：关闭弹窗但保留账号（用户可在账号列表里点"重新授权"）
+      errorMessage.value = data.error || '授权确认失败，请重试。';
+      oauthModal.value.show = false;
+      await fetchAccounts();
     }
   } catch (e: any) {
-    errorMessage.value = '导入失败: ' + e.message;
+    errorMessage.value = '授权确认失败: ' + e.message;
   } finally {
-    importLoginLoading.value = false;
+    checkLoginLoading.value = false;
   }
 };
 
@@ -381,6 +402,76 @@ const rebindApiKey = async () => {
   }
 };
 
+const fetchTasks = async (page = taskPage.value) => {
+  taskLoading.value = true;
+  try {
+    const params = new URLSearchParams({ page: String(page), limit: String(taskLimit) });
+    if (taskFilterStatus.value) params.set('status', taskFilterStatus.value);
+    const res = await authFetch(`/admin/tasks?${params}`);
+    const data = await res.json();
+    tasks.value = data.tasks || [];
+    taskTotal.value = data.total || 0;
+    taskPage.value = page;
+  } catch (e: any) {
+    errorMessage.value = '获取任务列表失败: ' + e.message;
+  } finally {
+    taskLoading.value = false;
+  }
+};
+
+const forceFailTask = async (id: string) => {
+  if (!confirm('确认强制失败该任务？')) return;
+  failingId.value = id;
+  try {
+    const res = await authFetch(`/admin/tasks/${id}/fail`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: failReason.value || '管理员手动标记失败' })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      successMessage.value = '任务已标记为失败';
+      failReason.value = '';
+      taskDetail.value = null;
+      await fetchTasks();
+    } else {
+      errorMessage.value = data.error || '操作失败';
+    }
+  } catch (e: any) {
+    errorMessage.value = e.message;
+  } finally {
+    failingId.value = null;
+  }
+};
+
+const retryTask = async (id: string) => {
+  if (!confirm('确认重置任务为 PROCESSING？轮询守护进程将重新拉取。')) return;
+  retryingId.value = id;
+  try {
+    const res = await authFetch(`/admin/tasks/${id}/retry`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      successMessage.value = '任务已重置为 PROCESSING';
+      await fetchTasks();
+    } else {
+      errorMessage.value = data.error || '操作失败';
+    }
+  } catch (e: any) {
+    errorMessage.value = e.message;
+  } finally {
+    retryingId.value = null;
+  }
+};
+
+const openTaskDetail = (task: any) => { taskDetail.value = task; };
+
+const statusLabel = (s: string) => ({ PENDING: '待处理', PROCESSING: '生成中', SUCCESS: '已完成', FAILED: '已失败' }[s] || s);
+const statusClass = (s: string) => ({
+  PENDING: 'bg-slate-100 text-slate-500',
+  PROCESSING: 'bg-blue-100 text-blue-700',
+  SUCCESS: 'bg-emerald-100 text-emerald-700',
+  FAILED: 'bg-red-100 text-red-600'
+}[s] || 'bg-slate-100 text-slate-500');
+
 const initData = () => {
   if (!token.value) return;
   authFetch('/admin/sys/check')
@@ -414,6 +505,7 @@ onMounted(() => {
       <nav class="flex-1 space-y-2">
         <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">内部账号池</button>
         <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 令牌分发</button>
+        <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">任务管理</button>
         <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 集成文档</button>
         <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold mt-4">管理员安全</button>
       </nav>
@@ -422,42 +514,60 @@ onMounted(() => {
 
     <main class="flex-1 p-10 overflow-y-auto h-screen">
 
-      <!-- Auth URL Modal -->
-      <div v-if="authUrlModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-8 space-y-5">
-          <h3 class="font-extrabold text-xl text-slate-800">🔗 授权链接</h3>
-          <p class="text-sm text-slate-600 font-medium">{{ authModalTitle }}</p>
-          <a :href="authUrlModal" target="_blank" class="block break-all text-indigo-600 text-sm font-mono bg-indigo-50 p-4 rounded-lg border border-indigo-200 hover:bg-indigo-100 transition">{{ authUrlModal }}</a>
-          <button @click="copyAuthUrl" class="w-full border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 font-bold py-2.5 rounded-xl transition text-sm flex items-center justify-center gap-2">
-            <span>{{ authUrlCopied ? '✅ 已复制！' : '📋 复制授权链接' }}</span>
-          </button>
-          <p class="text-xs text-slate-500">👆 点击上方链接在浏览器中打开，或复制后发给账号持有人。完成授权后点击下方按钮刷新状态。</p>
-          <button @click="authUrlModal = ''; fetchAccounts()" class="w-full bg-slate-900 text-white font-bold py-3 rounded-xl">✅ 确认已完成授权</button>
-        </div>
-      </div>
-
-      <!-- JSON 导入登录弹窗 -->
-      <div v-if="importLoginModal.show" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-8 space-y-5">
-          <h3 class="font-extrabold text-xl text-slate-800">📥 JSON 导入登录态</h3>
-          <p class="text-sm text-slate-600">账号：<span class="font-bold">{{ importLoginModal.accountName }}</span></p>
-          <ol class="text-xs text-slate-500 space-y-1 list-decimal list-inside">
-            <li>直接打开下方“当前账号专用导入链接”（若浏览器未登录会自动跳转登录）</li>
-            <li>页面返回完整 JSON 后，复制并粘贴到下方</li>
-            <li>点击“确认导入”完成绑定</li>
-          </ol>
-          <div class="bg-slate-50 border border-slate-200 rounded-xl p-3">
-            <div class="flex items-center justify-between gap-3 mb-2">
-              <p class="text-xs font-bold text-slate-600">当前账号专用导入链接</p>
-              <button @click="copyImportUrl" class="text-xs border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 font-bold px-2 py-1 rounded-lg">{{ importUrlCopied ? '已复制' : '复制链接' }}</button>
+      <!-- OAuth Device Flow 授权弹窗 -->
+      <div v-if="oauthModal.show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+          <!-- 头部 -->
+          <div class="px-6 pt-6 pb-4 border-b border-slate-100">
+            <div class="flex items-center justify-between">
+              <h3 class="font-bold text-lg text-slate-800">授权登录</h3>
+              <button @click="closeOAuthModal" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
             </div>
-            <a :href="importLoginModal.importUrl" target="_blank" class="block break-all text-indigo-600 text-xs font-mono leading-5">{{ importLoginModal.importUrl }}</a>
+            <p class="text-sm text-slate-500 mt-1">账号：<span class="font-semibold text-slate-700">{{ oauthModal.accountName }}</span></p>
           </div>
-          <textarea v-model="importLoginJson" rows="8" class="w-full border border-slate-300 rounded-xl p-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none" placeholder='粘贴完整 JSON...'></textarea>
-          <div class="flex gap-3">
-            <button @click="importLoginModal.show = false" class="flex-1 border border-slate-300 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-50">取消</button>
-            <button @click="doImportLogin" :disabled="importLoginLoading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold py-3 rounded-xl">
-              {{ importLoginLoading ? '⏳ 导入中...' : '✅ 确认导入' }}
+
+          <div class="px-6 py-5 space-y-4">
+            <!-- 步骤说明 -->
+            <ol class="text-sm text-slate-500 space-y-1 list-decimal list-inside">
+              <li>点击下方按钮打开授权页面</li>
+              <li>在授权页面输入下方验证码</li>
+              <li>用即梦 VIP 账号登录并确认</li>
+              <li>回到这里点击「我已完成授权」</li>
+            </ol>
+
+            <!-- 授权链接 -->
+            <div class="rounded-xl border border-indigo-200 bg-indigo-50 overflow-hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-indigo-200 bg-indigo-100/60">
+                <span class="text-xs font-semibold text-indigo-600">授权链接</span>
+                <button @click="copyVerificationUri" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-200 transition">
+                  {{ verificationUriCopied ? '✓ 已复制' : '复制' }}
+                </button>
+              </div>
+              <a :href="oauthModal.verificationUri" target="_blank" class="block text-xs text-indigo-600 font-mono px-3 py-2.5 break-all leading-5 hover:bg-indigo-100/50 transition">{{ oauthModal.verificationUri }}</a>
+            </div>
+
+            <!-- 验证码 -->
+            <div class="rounded-xl border border-amber-200 bg-amber-50 overflow-hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-amber-200 bg-amber-100/60">
+                <span class="text-xs font-semibold text-amber-700">验证码</span>
+                <div class="flex items-center gap-2">
+                  <span v-if="oauthModal.expiresAt" class="text-xs text-amber-500">有效期至 {{ oauthModal.expiresAt }}</span>
+                  <button @click="copyUserCode" class="text-xs font-semibold text-amber-700 hover:text-amber-900 px-2 py-0.5 rounded hover:bg-amber-200 transition">
+                    {{ userCodeCopied ? '✓ 已复制' : '复制' }}
+                  </button>
+                </div>
+              </div>
+              <div class="px-3 py-3 text-center">
+                <span class="text-base font-black tracking-[0.2em] text-amber-800 font-mono select-all break-all">{{ oauthModal.userCode }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 底部按钮 -->
+          <div class="px-6 pb-6 flex gap-3">
+            <button @click="closeOAuthModal" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 transition">取消</button>
+            <button @click="doCheckLogin" :disabled="checkLoginLoading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
+              {{ checkLoginLoading ? '确认中...' : '✅ 我已完成授权' }}
             </button>
           </div>
         </div>
@@ -501,8 +611,8 @@ onMounted(() => {
               <button @click="reloginAccount(acc.id, acc.name)" :disabled="reloginLoadingId === acc.id" class="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ reloginLoadingId === acc.id ? '⏳' : '🔗' }} 重新授权
               </button>
-              <button @click="openImportLogin(acc)" class="text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
-                📥 JSON 导入
+              <button @click="deleteAccount(acc.id, acc.name)" class="text-sm font-semibold text-white bg-red-500 hover:bg-red-600 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
+                🗑 删除
               </button>
             </div>
           </div>
@@ -782,6 +892,102 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
   -H "Authorization: Bearer sk-jm-xxx" \
   -F "model=seedance2.0_vip" -F "prompt=人物嘴型对口型说话" \
   -F "image=@face1.jpg" -F "image=@face2.jpg" -F "audio=@voice.mp3" -F "duration=8"</pre>
+        </div>
+      </div>
+
+      <!-- ========== TAB: TASKS ========== -->
+      <div v-if="currentTab === 'tasks'" class="space-y-6">
+        <div class="flex items-center justify-between flex-wrap gap-4">
+          <h2 class="text-3xl font-black text-slate-800">任务管理</h2>
+          <div class="flex items-center gap-3">
+            <select v-model="taskFilterStatus" @change="fetchTasks(1)" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
+              <option value="">全部状态</option>
+              <option value="PENDING">PENDING</option>
+              <option value="PROCESSING">PROCESSING</option>
+              <option value="SUCCESS">SUCCESS</option>
+              <option value="FAILED">FAILED</option>
+            </select>
+            <button @click="fetchTasks(taskPage)" :disabled="taskLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">🔄 刷新</button>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 border-b border-slate-200">
+              <tr>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">状态</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">类型</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">模型</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">账号</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">提交时间</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">操作</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <tr v-if="taskLoading"><td colspan="6" class="text-center py-12 text-slate-400">加载中...</td></tr>
+              <tr v-else-if="tasks.length === 0"><td colspan="6" class="text-center py-12 text-slate-400">暂无任务</td></tr>
+              <tr v-for="task in tasks" :key="task.id" class="hover:bg-slate-50 transition">
+                <td class="px-4 py-3">
+                  <span class="text-xs font-bold px-2 py-1 rounded-full" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
+                </td>
+                <td class="px-4 py-3 text-xs font-mono text-slate-600">{{ task.type }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-slate-400">{{ new Date(task.createdAt).toLocaleString() }}</td>
+                <td class="px-4 py-3">
+                  <div class="flex items-center gap-2">
+                    <button @click="openTaskDetail(task)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition">详情</button>
+                    <button v-if="task.status !== 'SUCCESS' && task.status !== 'FAILED'" @click="forceFailTask(task.id)" :disabled="failingId === task.id" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">强制失败</button>
+                    <button v-if="task.status === 'FAILED' && task.jimengSubmitId" @click="retryTask(task.id)" :disabled="retryingId === task.id" class="text-xs font-semibold text-amber-600 bg-amber-50 hover:bg-amber-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">重试</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 分页 -->
+        <div v-if="taskTotal > taskLimit" class="flex items-center justify-between text-sm text-slate-500">
+          <span>共 {{ taskTotal }} 条，第 {{ taskPage }} / {{ Math.ceil(taskTotal / taskLimit) }} 页</span>
+          <div class="flex gap-2">
+            <button @click="fetchTasks(taskPage - 1)" :disabled="taskPage <= 1" class="px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-100 disabled:opacity-40">上一页</button>
+            <button @click="fetchTasks(taskPage + 1)" :disabled="taskPage >= Math.ceil(taskTotal / taskLimit)" class="px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-100 disabled:opacity-40">下一页</button>
+          </div>
+        </div>
+
+        <!-- 任务详情弹窗 -->
+        <div v-if="taskDetail" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="taskDetail = null">
+          <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+            <div class="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
+              <h3 class="font-black text-slate-800 text-lg">任务详情</h3>
+              <button @click="taskDetail = null" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+            </div>
+            <div class="px-6 py-5 overflow-y-auto space-y-4 text-sm">
+              <div class="grid grid-cols-2 gap-4">
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">任务 ID</p><code class="text-xs font-mono text-slate-700 break-all select-all">{{ taskDetail.id }}</code></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">状态</p><span class="text-xs font-bold px-2 py-1 rounded-full" :class="statusClass(taskDetail.status)">{{ statusLabel(taskDetail.status) }}</span></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">Submit ID</p><code class="text-xs font-mono text-slate-700 break-all select-all">{{ taskDetail.jimengSubmitId || '-' }}</code></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">Log ID</p><code class="text-xs font-mono text-slate-700 break-all select-all">{{ taskDetail.jimengLogId || '-' }}</code></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">类型</p><span class="font-mono text-xs">{{ taskDetail.type }}</span></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">模型</p><span class="font-mono text-xs">{{ taskDetail.model || '-' }}</span></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">账号</p><span>{{ taskDetail.account?.name || '-' }}</span></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">API Key 归属</p><span>{{ taskDetail.apiKey?.owner || '-' }}</span></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">创建时间</p><span>{{ new Date(taskDetail.createdAt).toLocaleString() }}</span></div>
+                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">更新时间</p><span>{{ new Date(taskDetail.updatedAt).toLocaleString() }}</span></div>
+              </div>
+              <div v-if="taskDetail.prompt"><p class="text-xs font-bold text-slate-400 uppercase mb-1">Prompt</p><p class="text-sm text-slate-700 bg-slate-50 rounded-lg px-3 py-2 break-words">{{ taskDetail.prompt }}</p></div>
+              <div v-if="taskDetail.resultUrl"><p class="text-xs font-bold text-slate-400 uppercase mb-1">结果 URL</p><a :href="taskDetail.resultUrl" target="_blank" class="text-xs font-mono text-indigo-600 hover:underline break-all">{{ taskDetail.resultUrl }}</a></div>
+              <div v-if="taskDetail.errorMsg"><p class="text-xs font-bold text-red-400 uppercase mb-1">失败原因</p><p class="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 break-words">{{ taskDetail.errorMsg }}</p></div>
+              <div v-if="taskDetail.pollErrorMsg"><p class="text-xs font-bold text-amber-500 uppercase mb-1">轮询异常（不代表任务失败）</p><p class="text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 break-words font-mono">{{ taskDetail.pollErrorMsg }}</p></div>
+              <div v-if="taskDetail.status !== 'SUCCESS' && taskDetail.status !== 'FAILED'" class="pt-2 border-t border-slate-100 space-y-2">
+                <p class="text-xs font-bold text-slate-500">手动干预</p>
+                <div class="flex gap-2 items-center">
+                  <input v-model="failReason" placeholder="失败原因（可选）" class="flex-1 border border-slate-300 px-3 py-2 rounded-lg text-xs outline-none focus:ring-2 focus:ring-red-400" />
+                  <button @click="forceFailTask(taskDetail.id)" :disabled="failingId === taskDetail.id" class="text-xs font-bold text-white bg-red-500 hover:bg-red-600 disabled:opacity-50 px-4 py-2 rounded-lg transition">强制失败</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

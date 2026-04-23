@@ -48,6 +48,7 @@ model Task {
   model           String?  // e.g. "seedance2.0", "3.5pro", "5.0"
   prompt          String
   jimengSubmitId  String?  // The native submit_id from CLI
+  jimengLogId     String?  // The logid returned by CLI (Bytedance request trace ID)
   status          String   @default("PENDING") // PENDING, PROCESSING, SUCCESS, FAILED 
   resultUrl       String?  // The final outcome URL
   errorMsg        String?  // 火山明确返回的失败原因

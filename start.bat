@@ -45,7 +45,7 @@ if exist "%~dp0bin\dreamina.exe" goto CLI_READY
 
 echo [!] 未检测到即梦 CLI (dreamina.exe)，正在从官方自动下载...
 if not exist "%~dp0bin" mkdir "%~dp0bin"
-powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://sf3-cn.feishucdn.com/obj/ies-hotsoon-draft/dreamina_installer/dreamina.exe' -OutFile '%~dp0bin\dreamina.exe' -UseBasicParsing"
+powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://lf3-static.bytednsdoc.com/obj/eden-cn/psj_hupthlyk/ljhwZthlaukjlkulzlp/dreamina_cli_beta/dreamina_cli_windows_amd64.exe' -OutFile '%~dp0bin\dreamina.exe' -UseBasicParsing"
 if exist "%~dp0bin\dreamina.exe" goto CLI_READY
 
 echo [错误] 即梦 CLI 下载失败，请手动前往官方文档获取并放入 bin 目录。

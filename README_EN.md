@@ -52,12 +52,19 @@ If deploying on Ubuntu/CentOS:
 1. This repository was created **solely to solve the pain point of integrating Jimeng API into personal workflows, intended for personal learning, research, and workflow automation.**
 2. **Do not use illegally**. Any serious consequences or financial losses caused by illegal abuse, commercial profiteering, or violation of official Jimeng terms of service are **entirely unrelated to the author of this repository**. If you do not agree, delete this code immediately.
 
-## 📖 Core Documentation Navigation
+## �️ Admin Dashboard Guide
 
+After starting the service, log in to the admin dashboard to bind your Jimeng VIP account and issue API tokens.
+
+Key features of the dashboard:
+- **Account Pool**: Bind and manage Jimeng VIP accounts via OAuth Device Flow. Check credit balance and status in one click.
+- **API Token Management**: Generate, disable, or delete API keys. Optionally bind a key to a specific account or use the shared pool.
+- **Task Management**: View all generation tasks in real time (PENDING / PROCESSING / SUCCESS / FAILED). Filter by status, inspect submit_id / logid for debugging, and force-fail or retry any stuck task.
+- **Admin Security**: Change the dashboard login password.
+
+**Detailed documentation:**
 1. **👉 [Admin Manual EN](./docs/后台管理使用手册_EN.md)**
-   > 👈 Learn how to securely bind your VIP account, distribute API tokens, and protect against credential theft.
 2. **👉 [API Integration Docs EN](./docs/API集成文档_EN.md)**
-   > 👈 Learn how to seamlessly integrate using standard OpenAI protocols by simply replacing the Base URL and API Key.
 
 ---
 

@@ -67,4 +67,3 @@ rmdir /s /q "%PACK_DIR%"
 echo.
 echo [✓] 升级包完成：jimeng-upgrade.zip
 echo     完整包 pack.bat 未修改；该升级包不包含 data 目录
-pause

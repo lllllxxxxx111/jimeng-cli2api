@@ -46,33 +46,12 @@ router.get('/sys/check', adminAuth_1.adminAuth, (req, res) => res.json({ ok: tru
 // Apply middleware to subsequent routes
 router.use(adminAuth_1.adminAuth);
 const prisma = new client_1.PrismaClient();
-const LOGIN_CONTEXT_FILE = '.dreamina_login_context.json';
-function extractRandomSecretKey(authUrl) {
-    try {
-        return new URL(authUrl).searchParams.get('random_secret_key');
-    }
-    catch {
-        return null;
-    }
+const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
+function saveOAuthContext(accountHomeDir, ctx) {
+    fs_1.default.writeFileSync(path_1.default.join(accountHomeDir, OAUTH_CONTEXT_FILE), JSON.stringify(ctx, null, 2), 'utf8');
 }
-function buildImportUrl(randomSecretKey) {
-    return `https://jimeng.jianying.com/dreamina/cli/v1/dreamina_cli_login?aid=513695&random_secret_key=${randomSecretKey}&web_version=7.5.0`;
-}
-function saveLoginContext(accountHomeDir, authUrl) {
-    const randomSecretKey = extractRandomSecretKey(authUrl);
-    if (!randomSecretKey)
-        return null;
-    const loginContext = {
-        authUrl,
-        randomSecretKey,
-        importUrl: buildImportUrl(randomSecretKey),
-        updatedAt: new Date().toISOString(),
-    };
-    fs_1.default.writeFileSync(path_1.default.join(accountHomeDir, LOGIN_CONTEXT_FILE), JSON.stringify(loginContext, null, 2), 'utf8');
-    return loginContext;
-}
-function readLoginContext(accountHomeDir) {
-    const filePath = path_1.default.join(accountHomeDir, LOGIN_CONTEXT_FILE);
+function readOAuthContext(accountHomeDir) {
+    const filePath = path_1.default.join(accountHomeDir, OAUTH_CONTEXT_FILE);
     if (!fs_1.default.existsSync(filePath))
         return null;
     try {
@@ -82,65 +61,81 @@ function readLoginContext(accountHomeDir) {
         return null;
     }
 }
-// 添加新即梦账号并触发登录
+// 解析 OAuth Device Flow 输出（verification_uri / user_code / device_code / expires_at）
+function parseOAuthOutput(output) {
+    const verificationUri = output.match(/verification_uri:\s*(\S+)/)?.[1] || null;
+    const userCode = output.match(/user_code:\s*(\S+)/)?.[1] || null;
+    const deviceCode = output.match(/device_code:\s*(\S+)/)?.[1] || null;
+    const expiresAt = output.match(/expires_at:\s*(\S+)/)?.[1] || null;
+    return { verificationUri, userCode, deviceCode, expiresAt };
+}
+// 添加新即梦账号并触发 OAuth Device Flow 登录
 router.post('/accounts/login', async (req, res) => {
     const { name } = req.body;
     if (!name)
-        return res.status(400).json({ error: "Name is required" });
+        return res.status(400).json({ error: '账号名称不能为空' });
     try {
-        // 1. 为新账号创建一个独立的本地文件夹存放其特定的 ~/.dreamina_cli
         const homeDir = path_1.default.resolve(__dirname, `../../data/accounts/${name}_${Date.now()}`);
-        if (!fs_1.default.existsSync(homeDir)) {
-            fs_1.default.mkdirSync(homeDir, { recursive: true });
-        }
-        // 2. 存入数据库
         const account = await prisma.jimengAccount.create({
             data: { name, homeDir, status: 'IDLE', creditBalance: 0 }
         });
-        // 3. 执行 login --debug。由于是交互式，我们希望捕获 debug 输出用于让用户在前端扫码
-        // 注意：如果 login 是完全阻塞的命令行 UI，我们需要在子进程 stdout 流上读出链接直接返回，而不是等待子进程结束
-        // 但是这里简化假设用 `--debug` 它会把授权链接打印出来
         const { spawn } = require('child_process');
         const absoluteHome = path_1.default.resolve(account.homeDir);
+        // 确保 homeDir 存在（隔离目录），否则 Go CLI 会回退到真实用户 home
+        fs_1.default.mkdirSync(absoluteHome, { recursive: true });
         const env = { ...process.env, HOME: absoluteHome, USERPROFILE: absoluteHome, APPDATA: absoluteHome, LOCALAPPDATA: absoluteHome };
-        // 优先使用项目 bin/ 内的可执行文件
-        const child = spawn(cliRunner_1.DREAMINA_BIN, ['login', '--debug'], { env, shell: false, windowsHide: true });
-        let responded = false;
-        child.stdout.on('data', (data) => {
-            const output = data.toString();
-            console.log(`[Jimeng Login Stdout]:\n${output}`);
-            // 只要捕获到链接，立刻给前端发送响应去弹窗，但！子进程不会被关掉，它会继续在后台等你扫码完成！
-            if (!responded) {
-                const linkMatch = output.match(/https:\/\/jimeng\.jianying\.com[^\s|<>"'\\]+/i);
-                if (linkMatch) {
-                    const loginContext = saveLoginContext(absoluteHome, linkMatch[0]);
-                    responded = true;
-                    res.json({ account, authUrl: linkMatch[0], importUrl: loginContext?.importUrl || null, rawStdout: output });
-                }
+        // 生成唯一 random_secret_key：确保此账号在 Windows Credential Manager 中有独立条目
+        // relogin 删的是当前 credential 里新 key 对应的 CM 条目（根本不存在），不会影响其他账号
+        (0, cliRunner_1.generateFreshCredential)(absoluteHome);
+        let oauthResult;
+        try {
+            // cmMode='clear': 删除 CM 条目，让 relogin 看到空状态，不触发旧账号的服务端 logout
+            oauthResult = await (0, cliRunner_1.withCredSwap)(absoluteHome, () => new Promise((resolve, reject) => {
+                const child = spawn(cliRunner_1.DREAMINA_BIN, ['relogin', '--headless'], { env, shell: false, windowsHide: true });
+                let allOutput = '';
+                let done = false;
+                const finish = (ok, err) => {
+                    if (done)
+                        return;
+                    done = true;
+                    if (err)
+                        reject(err);
+                    else
+                        resolve(ok);
+                };
+                const tryParse = (chunk) => {
+                    allOutput += chunk;
+                    console.log(`[Login stdout/err]: ${chunk}`);
+                    const parsed = parseOAuthOutput(allOutput);
+                    if (parsed.deviceCode && parsed.verificationUri) {
+                        saveOAuthContext(absoluteHome, { ...parsed, updatedAt: new Date().toISOString() });
+                        finish(parsed);
+                    }
+                };
+                child.stdout.on('data', (d) => tryParse(d.toString()));
+                child.stderr.on('data', (d) => tryParse(d.toString()));
+                child.on('close', (code) => finish(undefined, new Error(`CLI 退出 (code=${code})，未获取到授权信息。`)));
+                child.on('error', (err) => finish(undefined, err));
+                setTimeout(() => finish(undefined, new Error('等待授权信息超时（15秒）。')), 15000);
+            }), 'clear');
+        }
+        catch (err) {
+            // spawn 失败：清理刚创建的 DB 记录和 homeDir，避免留下孤立账号
+            try {
+                await prisma.jimengAccount.delete({ where: { id: account.id } });
+                if (fs_1.default.existsSync(absoluteHome))
+                    fs_1.default.rmSync(absoluteHome, { recursive: true, force: true });
             }
-        });
-        child.stderr.on('data', (data) => {
-            console.log(`[Jimeng Login Stderr]:\n${data.toString()}`);
-        });
-        child.on('close', (code) => {
-            if (!responded) {
-                responded = true;
-                res.status(500).json({ error: `CLI 进程直接退出了 (状态码: ${code})。系统可能无法识别 'dreamina' 命令，请确保你已经**彻底关闭并重新启动了**运行后端的那个终端。` });
-            }
-        });
-        // 10秒超时保护
-        setTimeout(() => {
-            if (!responded) {
-                responded = true;
-                res.status(500).json({ error: '等待 CLI 抛出登录链接超时了（10秒）。请查看 Node.js 后端终端获取详细情况。' });
-            }
-        }, 10000);
+            catch { }
+            return res.status(500).json({ error: err.message });
+        }
+        return res.json({ account, ...oauthResult });
     }
     catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
-// 重新登录或完成现有的即梦账号绑定
+// 重新登录（OAuth Device Flow）
 router.post('/accounts/:id/relogin', async (req, res) => {
     try {
         const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
@@ -148,131 +143,101 @@ router.post('/accounts/:id/relogin', async (req, res) => {
             return res.status(404).json({ error: "账号不存在" });
         const { spawn } = require('child_process');
         const absoluteHome = path_1.default.resolve(account.homeDir);
+        // 确保 homeDir 存在（隔离目录）
+        fs_1.default.mkdirSync(absoluteHome, { recursive: true });
         const env = { ...process.env, HOME: absoluteHome, USERPROFILE: absoluteHome, APPDATA: absoluteHome, LOCALAPPDATA: absoluteHome };
-        // 直接走 debug 模式：即使本地回调端口冲突，也能拿到 manual import 链接
-        const child = spawn(cliRunner_1.DREAMINA_BIN, ['relogin', '--debug'], { env, shell: false, windowsHide: true });
-        let responded = false;
-        let allOutput = '';
-        const tryRespondByOutput = (chunk) => {
-            allOutput += chunk;
-            const linkMatch = allOutput.match(/https:\/\/jimeng\.jianying\.com[^\s|<>"'\\]+/i);
-            if (!responded && linkMatch) {
-                const loginContext = saveLoginContext(absoluteHome, linkMatch[0]);
-                responded = true;
-                res.json({
-                    authUrl: linkMatch[0],
-                    importUrl: loginContext?.importUrl || null,
-                    mode: 'manual-import-preferred',
-                    message: '若提示端口占用，请直接使用 JSON 导入方式完成登录。'
-                });
-            }
-        };
-        child.stdout.on('data', (data) => {
-            const output = data.toString();
-            console.log(`[Relogin Stdout]: ${output}`);
-            tryRespondByOutput(output);
-        });
-        child.stderr.on('data', (data) => {
-            const output = data.toString();
-            console.log(`[Relogin Stderr]: ${output}`);
-            tryRespondByOutput(output);
-        });
-        child.on('close', (code) => {
-            console.log(`[Relogin] CLI exited with code ${code}`);
-            if (!responded) {
-                responded = true;
-                res.status(500).json({
-                    error: `relogin 失败（code=${code}）。请改用 JSON 导入登录。`,
-                    rawOutput: allOutput
-                });
-            }
-        });
-        child.on('error', (err) => {
-            if (!responded) {
-                responded = true;
-                res.status(500).json({ error: `无法启动 CLI: ${err.message}` });
-            }
-        });
-        setTimeout(() => {
-            if (!responded) {
-                responded = true;
-                res.status(500).json({ error: '等待登录链接超时（20秒）。请点击 JSON 导入并用当前账号专用链接完成授权。' });
-            }
-        }, 20000);
+        // 生成唯一 random_secret_key：确保此账号在 Windows Credential Manager 中有独立条目
+        // relogin 删的是当前 credential 里新 key 对应的 CM 条目（根本不存在），不会影响其他账号
+        (0, cliRunner_1.generateFreshCredential)(absoluteHome);
+        let oauthResult;
+        try {
+            // cmMode='clear': 删除 CM 条目，让 relogin 看到空状态，不触发旧账号的服务端 logout
+            oauthResult = await (0, cliRunner_1.withCredSwap)(absoluteHome, () => new Promise((resolve, reject) => {
+                const child = spawn(cliRunner_1.DREAMINA_BIN, ['relogin', '--headless'], { env, shell: false, windowsHide: true });
+                let allOutput = '';
+                let done = false;
+                const finish = (ok, err) => {
+                    if (done)
+                        return;
+                    done = true;
+                    if (err)
+                        reject(err);
+                    else
+                        resolve(ok);
+                };
+                const tryParse = (chunk) => {
+                    allOutput += chunk;
+                    console.log(`[Relogin stdout/err]: ${chunk}`);
+                    const parsed = parseOAuthOutput(allOutput);
+                    if (parsed.deviceCode && parsed.verificationUri) {
+                        saveOAuthContext(absoluteHome, { ...parsed, updatedAt: new Date().toISOString() });
+                        finish(parsed);
+                    }
+                };
+                child.stdout.on('data', (d) => tryParse(d.toString()));
+                child.stderr.on('data', (d) => tryParse(d.toString()));
+                child.on('close', (code) => finish(undefined, new Error(`relogin 失败 (code=${code})。`)));
+                child.on('error', (err) => finish(undefined, err));
+                setTimeout(() => finish(undefined, new Error('等待授权信息超时（15秒）。')), 15000);
+            }), 'clear');
+        }
+        catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
+        return res.json({ ...oauthResult });
     }
     catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
+// 读取当前 OAuth 上下文
 router.get('/accounts/:id/login-context', async (req, res) => {
     try {
         const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
         if (!account)
             return res.status(404).json({ error: '账号不存在' });
-        const loginContext = readLoginContext(path_1.default.resolve(account.homeDir));
-        if (!loginContext) {
-            return res.status(404).json({ error: '未找到该账号最近一次登录上下文，请先点击“重新授权”或“部署新账号实例”。' });
-        }
-        res.json(loginContext);
+        const ctx = readOAuthContext(path_1.default.resolve(account.homeDir));
+        if (!ctx)
+            return res.status(404).json({ error: '未找到授权上下文，请先点击"重新授权"。' });
+        res.json(ctx);
     }
     catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
-// JSON 导入登录态
-router.post('/accounts/:id/import-login', async (req, res) => {
+// OAuth checklogin：用 device_code 确认授权完成
+router.post('/accounts/:id/checklogin', async (req, res) => {
     try {
         const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
         if (!account)
-            return res.status(404).json({ error: "账号不存在" });
-        const { loginJson } = req.body;
-        if (!loginJson)
-            return res.status(400).json({ error: "loginJson 不能为空" });
-        // 兼容从 txt 粘贴时混入的 BOM/前后说明文字/空白
-        let parsed;
+            return res.status(404).json({ error: '账号不存在' });
+        const { deviceCode } = req.body;
+        if (!deviceCode)
+            return res.status(400).json({ error: 'deviceCode 不能为空' });
+        let checkOutput = '';
         try {
-            const rawText = typeof loginJson === 'string' ? loginJson : JSON.stringify(loginJson);
-            const cleanedText = rawText.replace(/^\uFEFF/, '').trim();
-            const first = cleanedText.indexOf('{');
-            const last = cleanedText.lastIndexOf('}');
-            if (first === -1 || last === -1 || last <= first) {
-                return res.status(400).json({ error: "loginJson 不是有效 JSON 对象" });
-            }
-            const jsonBody = cleanedText.slice(first, last + 1);
-            parsed = JSON.parse(jsonBody);
-        }
-        catch {
-            return res.status(400).json({ error: "loginJson 格式不合法" });
-        }
-        if (!parsed || !parsed.auth_token) {
-            return res.status(400).json({ error: "loginJson 缺少 auth_token 字段，请确认复制的是 dreamina_cli_login 的完整响应 body" });
-        }
-        const absoluteHome = path_1.default.resolve(account.homeDir);
-        const tmpFile = path_1.default.join(absoluteHome, 'dreamina-login-import.json');
-        // 用标准 JSON 重写，避免 txt 粘贴导致的隐藏字符污染
-        const jsonStr = JSON.stringify(parsed);
-        fs_1.default.writeFileSync(tmpFile, jsonStr, 'utf8');
-        try {
-            const { stdout, stderr } = await (0, cliRunner_1.runJimengCommand)(`dreamina import_login_response --file "${tmpFile}"`, account.homeDir);
-            fs_1.default.unlinkSync(tmpFile);
-            const output = stdout + stderr;
-            // 更新账号状态为 IDLE
-            await prisma.jimengAccount.update({ where: { id: account.id }, data: { status: 'IDLE' } });
-            res.json({ success: true, output });
+            // saveBackup=true: checklogin 成功写入 credential 后立即在锁内备份，防止其他账号在锁释放前抢占
+            const { stdout, stderr } = await (0, cliRunner_1.runJimengCommand)(`dreamina login checklogin --device_code=${deviceCode} --poll=60`, account.homeDir, true // saveBackup
+            );
+            checkOutput = stdout + stderr;
         }
         catch (e) {
-            if (fs_1.default.existsSync(tmpFile))
-                fs_1.default.unlinkSync(tmpFile);
-            const msg = String(e.message || '');
-            if (msg.includes('auth_token cannot be decrypted by local random_secret_key')) {
-                const ctx = readLoginContext(absoluteHome);
-                return res.status(500).json({
-                    error: '导入失败：当前 JSON 与本账号这次登录的 random_secret_key 不匹配。请不要再次点击“重新授权”，直接使用当前弹窗中的“当前账号专用导入链接”重新获取 JSON 后立刻导入。',
-                    importUrl: ctx?.importUrl || null,
-                });
+            checkOutput = String(e.message || '');
+            if (checkOutput.includes('authorization_pending') || checkOutput.includes('pending')) {
+                return res.status(202).json({ pending: true, message: '用户尚未在浏览器完成授权，请完成后再点击确认。' });
             }
-            res.status(500).json({ error: e.message });
+            throw e;
         }
+        console.log(`[Checklogin output]: ${checkOutput}`);
+        try {
+            const { stdout: creditOut } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir);
+            if (creditOut && creditOut.includes('credit')) {
+                await prisma.jimengAccount.update({ where: { id: account.id }, data: { status: 'IDLE' } });
+                return res.json({ success: true, output: creditOut });
+            }
+        }
+        catch { }
+        res.status(500).json({ error: `授权确认失败，请重试。输出: ${checkOutput.substring(0, 300)}` });
     }
     catch (error) {
         res.status(500).json({ error: error.message });
@@ -282,6 +247,28 @@ router.post('/accounts/:id/import-login', async (req, res) => {
 router.get('/accounts', async (req, res) => {
     const accounts = await prisma.jimengAccount.findMany();
     res.json(accounts);
+});
+// 删除账号实例（同时清理本地 homeDir 文件）
+router.delete('/accounts/:id', async (req, res) => {
+    try {
+        const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
+        if (!account)
+            return res.status(404).json({ error: '账号不存在' });
+        // 先删 DB 记录
+        await prisma.jimengAccount.delete({ where: { id: account.id } });
+        // 再清理 homeDir（忽略错误，目录可能不存在）
+        try {
+            const absoluteHome = path_1.default.resolve(account.homeDir);
+            if (fs_1.default.existsSync(absoluteHome)) {
+                fs_1.default.rmSync(absoluteHome, { recursive: true, force: true });
+            }
+        }
+        catch (_) { }
+        res.json({ success: true });
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 // 测试连通性并获取余额 (依赖手册中的 `dreamina user_credit` 命令)
 router.post('/accounts/:id/check', async (req, res) => {
@@ -394,6 +381,97 @@ router.delete('/apikeys/:id', async (req, res) => {
             where: { id: req.params.id }
         });
         res.json(apikey);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ── 任务管理 ───────────────────────────────────────────────────────
+// 查询任务列表（支持 status/apiKeyId/accountId 过滤，分页）
+router.get('/tasks', async (req, res) => {
+    try {
+        const { status, accountId, page = '1', limit = '20' } = req.query;
+        const where = {};
+        if (status)
+            where.status = status;
+        if (accountId)
+            where.accountId = accountId;
+        const pageNum = Math.max(1, parseInt(page));
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+        const skip = (pageNum - 1) * limitNum;
+        const [total, tasks] = await Promise.all([
+            prisma.task.count({ where }),
+            prisma.task.findMany({
+                where,
+                orderBy: { createdAt: 'desc' },
+                skip,
+                take: limitNum,
+                include: {
+                    account: { select: { id: true, name: true } },
+                    apiKey: { select: { id: true, owner: true } }
+                }
+            })
+        ]);
+        res.json({ total, page: pageNum, limit: limitNum, tasks });
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// 获取单个任务详情
+router.get('/tasks/:id', async (req, res) => {
+    try {
+        const task = await prisma.task.findUnique({
+            where: { id: req.params.id },
+            include: {
+                account: { select: { id: true, name: true } },
+                apiKey: { select: { id: true, owner: true } }
+            }
+        });
+        if (!task)
+            return res.status(404).json({ error: '任务不存在' });
+        res.json(task);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// 强制失败任务（管理员手动干预卡住的任务）
+router.post('/tasks/:id/fail', async (req, res) => {
+    try {
+        const { reason } = req.body;
+        const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+        if (!task)
+            return res.status(404).json({ error: '任务不存在' });
+        if (task.status === 'SUCCESS')
+            return res.status(400).json({ error: '任务已成功，无法标记失败' });
+        const updated = await prisma.task.update({
+            where: { id: req.params.id },
+            data: {
+                status: 'FAILED',
+                errorMsg: reason || '管理员手动标记失败',
+                pollErrorMsg: null
+            }
+        });
+        res.json(updated);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// 重置任务为 PROCESSING（允许重新轮询）
+router.post('/tasks/:id/retry', async (req, res) => {
+    try {
+        const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+        if (!task)
+            return res.status(404).json({ error: '任务不存在' });
+        if (!task.jimengSubmitId)
+            return res.status(400).json({ error: '任务没有 submit_id，无法重试' });
+        const updated = await prisma.task.update({
+            where: { id: req.params.id },
+            data: { status: 'PROCESSING', errorMsg: null, pollErrorMsg: null }
+        });
+        res.json(updated);
     }
     catch (error) {
         res.status(500).json({ error: error.message });

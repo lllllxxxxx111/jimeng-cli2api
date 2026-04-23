@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { runJimengCommand } from '../utils/cliRunner';
+import { runJimengCommand, runJimengCommandInSwap, withCredSwap } from '../utils/cliRunner';
 
 const prisma = new PrismaClient();
 
@@ -69,7 +69,7 @@ function normalizeTaskState(payload: any, taskType: string) {
   if (!item || typeof item !== 'object') return null;
 
   const rawStatus = String(item.gen_status ?? item.status ?? item.task_status ?? '').toLowerCase();
-  const isProcessing = ['pending', 'processing', 'running', 'queueing', 'queued', 'submitted'].includes(rawStatus);
+  const isProcessing = ['pending', 'processing', 'running', 'queueing', 'queued', 'submitted', 'querying'].includes(rawStatus);
   const isFailed = ['failed', 'fail', 'error'].includes(rawStatus) || item.status === 2;
 
   let finalUrl = null;
@@ -108,6 +108,19 @@ export const pollingDaemon = {
       isPolling = true;
 
       try {
+        // ── 24h 超时：提交超过 24h 仍 PROCESSING 的任务直接标 FAILED ──
+        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const timedOut = await prisma.task.findMany({
+          where: { status: 'PROCESSING', createdAt: { lt: cutoff } }
+        });
+        for (const t of timedOut) {
+          console.warn(`[Daemon] Task ${t.id} timed out (>24h). Marking FAILED.`);
+          await prisma.task.update({
+            where: { id: t.id },
+            data: { status: 'FAILED', errorMsg: '任务超过24小时未完成，已自动标记为失败。', pollErrorMsg: null }
+          });
+        }
+
         const tasks = await prisma.task.findMany({
           where: { status: 'PROCESSING', jimengSubmitId: { not: null } },
           include: { account: true }
@@ -118,49 +131,60 @@ export const pollingDaemon = {
         const batchSize = getAdaptiveConcurrency(tasks.length);
         console.log(`[Daemon] Polling ${tasks.length} tasks, concurrency=${batchSize}, networkErrors=${consecutiveNetworkErrors}`);
 
-        for (let i = 0; i < tasks.length; i += batchSize) {
-          const batch = tasks.slice(i, i + batchSize);
-          await Promise.all(batch.map(async (task) => {
-            if (!task.jimengSubmitId) return;
+        // Windows: 将所有任务按账号分组，每个账号只做一次注册表 swap，
+        //          同账号内的多条查询在同一次 swap 内并发执行。
+        // Unix:    withCredSwap 直接透传（无 mutex），所有任务真正并发。
+        type TaskWithAccount = typeof tasks[0];
+        const byAccount = new Map<string, TaskWithAccount[]>();
+        for (const task of tasks) {
+          const key = task.accountId ?? '__none__';
+          if (!byAccount.has(key)) byAccount.set(key, []);
+          byAccount.get(key)!.push(task);
+        }
 
-            const homeDir = (task as any).account?.homeDir || process.cwd();
-            const t0 = Date.now();
-
-            let stdout = '';
-            let isNetworkError = false;
-
-            // ── 1. 调用 CLI 查询 ──────────────────────────────────
-            try {
-              const result = await runJimengCommand(
-                `dreamina query_result --submit_id=${task.jimengSubmitId}`, homeDir
-              );
-              stdout = result.stdout;
-              recordResponseTime(Date.now() - t0);
-            } catch (queryErr: any) {
-              recordResponseTime(TARGET_BATCH_MS); // 失败记为慢请求，压低并发
+        // 账号间顺序迭代（释放 mutex 间隙给新提交），账号内任务并发执行。
+        // Windows: Promise.all(accounts) 会让所有账号同时入队 mutex 形成连续块，
+        //          新提交无法插入；改为 for...of 后，每个账号释放锁后
+        //          新提交可以在账号间隙中抢到 mutex，避免饥饿。
+        // Unix:    withCredSwap 无 mutex，顺序 vs 并发性能相同。
+        for (const [, accountTasks] of byAccount.entries()) {
+          const homeDir = (accountTasks[0] as any).account?.homeDir || process.cwd();
+          await withCredSwap(homeDir, async () => {
+            // 同账号任务：锁内并发执行（不再各自 re-acquire mutex）
+            await Promise.all(accountTasks.map(async (task) => {
+              if (!task.jimengSubmitId) return;
+              const t0 = Date.now();
+              let stdout = '';
+              let isNetworkError = false;
               try {
-                // fallback: list_task
-                const t1 = Date.now();
-                const result = await runJimengCommand(
-                  `dreamina list_task --submit_id=${task.jimengSubmitId} --limit=1`, homeDir
+                const result = await runJimengCommandInSwap(
+                  `dreamina query_result --submit_id=${task.jimengSubmitId}`, homeDir
                 );
                 stdout = result.stdout;
-                recordResponseTime(Date.now() - t1);
-              } catch (fallbackErr: any) {
-                // 两个命令都失败 → 网络问题，不动任务状态
-                isNetworkError = true;
-                const errMsg = String(fallbackErr?.message || queryErr?.message || '未知网络错误');
-                consecutiveNetworkErrors++;
-                console.warn(`[Daemon] Network error for task ${task.id} (globalNetErr=${consecutiveNetworkErrors}): ${errMsg}`);
-                await prisma.task.update({
-                  where: { id: task.id },
-                  data: {
-                    pollErrorMsg: `[${new Date().toISOString()}] 我方网络异常，轮询暂时中断，任务仍在火山排队。错误: ${errMsg.substring(0, 200)}`
-                  }
-                });
-                return; // 不处理状态，等下次轮询
+                recordResponseTime(Date.now() - t0);
+              } catch (queryErr: any) {
+                recordResponseTime(TARGET_BATCH_MS);
+                try {
+                  const t1 = Date.now();
+                  const result = await runJimengCommandInSwap(
+                    `dreamina list_task --submit_id=${task.jimengSubmitId} --limit=1`, homeDir
+                  );
+                  stdout = result.stdout;
+                  recordResponseTime(Date.now() - t1);
+                } catch (fallbackErr: any) {
+                  isNetworkError = true;
+                  const errMsg = String(fallbackErr?.message || queryErr?.message || '未知网络错误');
+                  consecutiveNetworkErrors++;
+                  console.warn(`[Daemon] Network error for task ${task.id} (globalNetErr=${consecutiveNetworkErrors}): ${errMsg}`);
+                  await prisma.task.update({
+                    where: { id: task.id },
+                    data: {
+                      pollErrorMsg: `[${new Date().toISOString()}] 我方网络异常，轮询暂时中断，任务仍在火山排队。错误: ${errMsg.substring(0, 200)}`
+                    }
+                  });
+                  return;
+                }
               }
-            }
 
             // ── 2. 解析火山的回复 ─────────────────────────────────
             // 到这里说明 CLI 调用成功了，网络恢复
@@ -192,12 +216,13 @@ export const pollingDaemon = {
               });
             } else if (state.isFailed) {
               // 火山明确：失败（gen_status = failed/fail/error，或 status=2）
-              console.log(`[Daemon] Task ${task.id} FAILED by Volcengine. rawStatus=${state.rawStatus}`);
+              const failReason = state.item.fail_reason || state.item.error_msg || state.item.message || null;
+              console.log(`[Daemon] Task ${task.id} FAILED by Volcengine. rawStatus=${state.rawStatus}, reason=${failReason}`);
               await prisma.task.update({
                 where: { id: task.id },
                 data: {
                   status: 'FAILED',
-                  errorMsg: `火山服务返回失败。状态: ${state.rawStatus}. 原始: ${stdout.substring(0, 200)}`,
+                  errorMsg: failReason || `火山服务返回失败。状态: ${state.rawStatus}. 原始: ${stdout.substring(0, 200)}`,
                   pollErrorMsg: null
                 }
               });
@@ -216,8 +241,9 @@ export const pollingDaemon = {
                 data: { pollErrorMsg: `[${new Date().toISOString()}] 未知状态"${state.rawStatus}"，保持等待。` }
               });
             }
-          }));
-        }
+          }));  // end Promise.all(accountTasks)
+          });    // end withCredSwap callback
+        }          // end for...of byAccount
       } catch (err) {
         console.error('[Daemon] Fatal error in polling loop:', err);
       } finally {
