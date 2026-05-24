@@ -22,8 +22,8 @@
 | `text2video` / `image2video` / `frames2video` | `POST /v1/videos/generations`，用 `mode` 或附件自动路由 |
 | `multiframe2video` / `multimodal2video` | `POST /v1/videos/generations`，支持多图、视频、音频和转场参数 |
 | `query_result` | 后台轮询守护进程自动执行，客户端用 `GET /v1/tasks/:id` 查询 |
-| `user_credit` / `list_task` | 管理后台账号检测、运行监控和任务管理 |
-| `session` | 生成接口可传 `session`，用于 CLI 的 `--session` |
+| `user_credit` / `list_task` | 管理后台账号检测、运行监控和任务管理；`list_task` 也可在“CLI 原生工具”页按账号直查 |
+| `session` | 生成接口可传 `session`，用于 CLI 的 `--session`；会话创建/查询/改名/删除在管理后台暴露 |
 
 ---
 
@@ -147,9 +147,10 @@ Authorization: Bearer sk-jm-xxx
 ```json
 {
   "object": "list",
+  "global_capabilities": { "multiframe2video": true },
   "data": [
-    { "id": "5.0", "object": "model", "owned_by": "dreamina", "capabilities": ["image"] },
-    { "id": "seedance2.0", "object": "model", "owned_by": "dreamina", "capabilities": ["text2video", "image2video", "frames2video", "multimodal2video"] },
+    { "id": "5.0", "object": "model", "owned_by": "dreamina", "capabilities": ["image", "text2image", "image2image"], "parameters": { "...": "..." } },
+    { "id": "seedance2.0", "object": "model", "owned_by": "dreamina", "capabilities": ["text2video", "image2video", "frames2video", "multimodal2video"], "parameters": { "...": "..." } },
     { "id": "image_upscale", "object": "model", "owned_by": "dreamina", "capabilities": ["image_upscale"] }
   ]
 }
@@ -257,14 +258,14 @@ POST /v1/videos/generations
 
 | model | 时长 (s) | 最高分辨率 | 文生视频 | 首尾帧 | 多模态·音频 | 备注 |
 |-------|----------|-----------|---------|--------|------------|------|
-| seedance2.0_vip | 4–15 | 720p | ✅ | ✅ | ✅ 图+视+音 | VIP 超极速 |
+| seedance2.0_vip | 4–15 | 720p/1080p | ✅ | ✅ | ✅ 图+视+音 | VIP 超极速 |
 | seedance2.0fast_vip | 4–15 | 720p | ✅ | ✅ | ✅ 图+视+音 | VIP 极速版 |
 | seedance2.0 | 4–15 | 720p | ✅ | ✅ | ✅ 图+视+音 | 标准推荐 |
 | seedance2.0fast | 4–15 | 720p | ✅ | ✅ | ✅ 图+视+音 | 快速出片 |
-| 3.5pro | 4–12 | 1080p | ✅ | ✅ 首·尾帧 | ❌ | 精细高清 |
-| 3.0pro | 3–10 | 1080p | ✅ | ✅ 首帧 | ❌ | 高清·单帧 |
-| 3.0fast | 3–10 | 720p | ✅ | ✅ 首帧 | ❌ | 快速 |
-| 3.0 | 3–10 | 720p/1080p | ✅ | ✅ 首·尾帧 | ❌ | 均衡 |
+| 3.5pro | 4–12 | 720p | ❌ | ✅ 首·尾帧 | ❌ | 图生视频/首尾帧 |
+| 3.0pro | 3–10 | 720p | ❌ | ✅ 首帧 | ❌ | 图生视频 |
+| 3.0fast | 3–10 | 720p | ❌ | ✅ 首帧 | ❌ | 图生视频快速版 |
+| 3.0 | 3–10 | 720p | ❌ | ✅ 首·尾帧 | ❌ | 图生视频/首尾帧 |
 
 > 模型名称支持下划线别名：`3.0_fast` → `3.0fast`，`3.0_pro` → `3.0pro`，`3.5_pro` → `3.5pro`
 
@@ -276,7 +277,7 @@ POST /v1/videos/generations
 | `model` | | 模型名称，默认 `seedance2.0fast` |
 | `mode` | | `auto` / `text2video` / `image2video` / `frames2video` / `multiframe2video` / `multimodal2video` |
 | `duration` | | 时长（整数秒），范围见上表 |
-| `video_resolution` | | seedance2.0 系：`720p`（暂仅此项，后续 1080p 支持时直接传入）<br>3.5pro / 3.0：`720p` 或 `1080p`；3.0pro：`1080p`；不传 = 模型默认 |
+| `video_resolution` | | 新版 CLI 当前仅 `seedance2.0_vip` 支持 `720p` / `1080p`；其他视频模型均为 `720p`；不传 = 模型默认 |
 | `ratio` | | 画幅比 `16:9`、`9:16`、`1:1`、`3:4`、`4:3`、`21:9` 等。<br>**仅 text2video 和 multimodal2video 生效**；image2video / frames2video / multiframe2video 命令不传此参数，CLI 自动跟首帧比例 |
 | `transition_prompt` | | 多图视频 3 张及以上时使用，可重复传多个或传 JSON 数组；数量必须等于图片数 - 1 |
 | `transition_duration` | | 多图视频 3 张及以上时使用，可重复传多个或传 JSON 数组；每段 0.5–8 秒，数量必须等于图片数 - 1 |
@@ -367,6 +368,37 @@ Content-Type: application/json
 ```
 
 返回 `level`、最高相似度和相似失败记录。`level=high` 时建议先改写提示词再提交生成，避免排队后失败。
+
+---
+
+## 管理端 CLI 原生工具接口
+
+这些接口只给管理后台使用，路径不在 `/v1` 下，需要管理员 token。它们用于按账号直接对齐新版 CLI 的管理能力，不对客户端暴露 `help`、`version`、`login`、`logout`。
+
+| CLI 功能 | 管理接口 | 说明 |
+|----------|----------|------|
+| `session list` | `GET /admin/native/sessions?accountId=<id>&maxCount=30` | 查看账号最近会话，`maxCount` 范围 1–100 |
+| `session create` | `POST /admin/native/sessions` | JSON：`{ "accountId": "...", "name": "项目名" }`，`name` 可省略 |
+| `session search` | `GET /admin/native/sessions/search?accountId=<id>&name=<keyword>` | 按名称查会话 |
+| `session rename` | `PUT /admin/native/sessions/:sessionId` | JSON：`{ "accountId": "...", "name": "新名称" }`，不允许改默认会话 0 |
+| `session delete` | `DELETE /admin/native/sessions/:sessionId` | JSON：`{ "accountId": "..." }`，不允许删默认会话 0 |
+| `list_task` | `GET /admin/native/tasks` | 支持 `gen_status`、`gen_task_type`、`submit_id`、`limit`、`offset` |
+| `query_result` | `GET /admin/native/query-result` | 必填 `accountId`、`submit_id`；`download=1` 时下载到 `data/downloads` 子目录 |
+
+返回体会包含原生命令、stdout、stderr、耗时和可解析 JSON：
+
+```json
+{
+  "success": true,
+  "accountId": "cl...",
+  "accountName": "vip_account_1",
+  "command": "dreamina list_task --limit=20 --offset=0",
+  "stdout": "...",
+  "stderr": "",
+  "parsed": null,
+  "elapsedMs": 1200
+}
+```
 
 ---
 

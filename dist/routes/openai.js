@@ -205,12 +205,122 @@ const addModelCapability = (id, capability) => {
     }
     MODEL_CAPABILITIES.get(id).add(capability);
 };
-IMAGE_MODELS.forEach(id => addModelCapability(id, 'image'));
+IMAGE_MODELS.forEach(id => {
+    addModelCapability(id, 'image');
+    addModelCapability(id, 'text2image');
+});
+Array.from(IMAGE2IMAGE_MODELS).forEach(id => addModelCapability(id, 'image2image'));
 Array.from(TEXT2VIDEO_MODELS).forEach(id => addModelCapability(id, 'text2video'));
 Array.from(IMAGE2VIDEO_MODELS).forEach(id => addModelCapability(id, 'image2video'));
 Array.from(FRAMES2VIDEO_MODELS).forEach(id => addModelCapability(id, 'frames2video'));
 Array.from(MULTIMODAL_MODELS).forEach(id => addModelCapability(id, 'multimodal2video'));
 addModelCapability('image_upscale', 'image_upscale');
+const setToArray = (values) => values ? Array.from(values) : [];
+const getImageParameters = (model) => {
+    if (model === 'image_upscale') {
+        return {
+            image_upscale: {
+                image: { min: 1, max: 1, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+                resolution_type: setToArray(UPSCALE_RESOLUTIONS),
+                vip_required_for: ['4k', '8k'],
+                session: { type: 'integer', min: 0 },
+            },
+        };
+    }
+    const parameters = {};
+    if (IMAGE_MODELS.includes(model)) {
+        parameters.text2image = {
+            prompt: { required: true },
+            ratio: setToArray(IMAGE_RATIOS),
+            resolution_type: setToArray(TEXT2IMAGE_RESOLUTIONS_BY_MODEL.get(model)),
+            session: { type: 'integer', min: 0 },
+        };
+    }
+    if (IMAGE2IMAGE_MODELS.has(model)) {
+        parameters.image2image = {
+            images: { min: 1, max: 10, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+            prompt: { required: false },
+            ratio: setToArray(IMAGE_RATIOS),
+            resolution_type: setToArray(IMAGE2IMAGE_RESOLUTIONS),
+            session: { type: 'integer', min: 0 },
+        };
+    }
+    return parameters;
+};
+const getVideoModeParameters = (mode, model) => {
+    const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
+    const common = {
+        duration: { min: minDuration, max: maxDuration, unit: 'seconds' },
+        video_resolution: setToArray(getVideoResolutionValues(mode, model)),
+        session: { type: 'integer', min: 0 },
+    };
+    if (mode === 'text2video') {
+        return {
+            ...common,
+            prompt: { required: true },
+            ratio: setToArray(VIDEO_RATIOS),
+        };
+    }
+    if (mode === 'image2video') {
+        return {
+            ...common,
+            image: { min: 1, max: 1, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+            prompt: { required: false },
+            ratio: 'inferred_from_input_image',
+        };
+    }
+    if (mode === 'frames2video') {
+        return {
+            ...common,
+            first: { required: true, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+            last: { required: true, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+            prompt: { required: false },
+            ratio: 'inferred_from_first_frame',
+        };
+    }
+    if (mode === 'multimodal2video') {
+        return {
+            ...common,
+            image: { min: 0, max: 9, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+            video: { min: 0, max: 3, max_bytes: VIDEO_MAX_BYTES, extensions: Array.from(VIDEO_EXTS), duration: { min: 2, max: 15 } },
+            audio: { min: 0, max: 3, max_bytes: AUDIO_MAX_BYTES, extensions: Array.from(AUDIO_EXTS), duration: { min: 2, max: 15 } },
+            at_least_one: ['image', 'video'],
+            prompt: { required: false },
+            ratio: setToArray(VIDEO_RATIOS),
+            request_max_bytes: REQUEST_MAX_BYTES,
+        };
+    }
+    return {};
+};
+const getModelParameters = (id) => {
+    const parameters = getImageParameters(id);
+    if (TEXT2VIDEO_MODELS.has(id))
+        parameters.text2video = getVideoModeParameters('text2video', id);
+    if (IMAGE2VIDEO_MODELS.has(id))
+        parameters.image2video = getVideoModeParameters('image2video', id);
+    if (FRAMES2VIDEO_MODELS.has(id))
+        parameters.frames2video = getVideoModeParameters('frames2video', id);
+    if (MULTIMODAL_MODELS.has(id))
+        parameters.multimodal2video = getVideoModeParameters('multimodal2video', id);
+    return parameters;
+};
+const GLOBAL_MODE_PARAMETERS = {
+    multiframe2video: {
+        images: { min: 2, max: 20, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+        exactly_two_images: {
+            prompt: { required: true },
+            duration: { min: 0.5, max: 8, unit: 'seconds', default: 3 },
+        },
+        three_or_more_images: {
+            transition_prompt: { count: 'images.length - 1', required: true },
+            transition_duration: { count: 'images.length - 1', min: 0.5, max: 8, unit: 'seconds', default: 3 },
+            total_duration: { min: 2, unit: 'seconds' },
+        },
+        unsupported: ['model_version', 'video_resolution', 'ratio'],
+        ratio: 'inferred_from_first_image',
+        session: { type: 'integer', min: 0 },
+    },
+};
 const getExt = (fileName) => {
     const idx = fileName.lastIndexOf('.');
     if (idx < 0)
@@ -472,12 +582,17 @@ function extractSubmitInfo(stdout) {
 router.get('/models', apiKeyAuth, (_req, res) => {
     res.json({
         object: 'list',
+        global_capabilities: {
+            multiframe2video: true,
+        },
+        global_parameters: GLOBAL_MODE_PARAMETERS,
         data: Array.from(MODEL_CAPABILITIES.entries()).map(([id, capabilities]) => ({
             id,
             object: 'model',
             created: 0,
             owned_by: 'dreamina',
             capabilities: Array.from(capabilities),
+            parameters: getModelParameters(id),
         })),
     });
 });

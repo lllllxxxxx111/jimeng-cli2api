@@ -54,6 +54,25 @@ const riskType = ref('');
 const riskLoading = ref(false);
 const riskResult = ref<any>(null);
 const riskError = ref('');
+const nativeAccountId = ref('');
+const nativeLoading = ref('');
+const nativeError = ref('');
+const nativeSessionsResult = ref<any>(null);
+const nativeTasksResult = ref<any>(null);
+const nativeQueryResult = ref<any>(null);
+const nativeSessionMaxCount = ref(30);
+const nativeSessionName = ref('');
+const nativeSessionSearchName = ref('');
+const nativeSessionId = ref('');
+const nativeSessionNewName = ref('');
+const nativeTaskStatus = ref('');
+const nativeTaskType = ref('');
+const nativeTaskSubmitId = ref('');
+const nativeTaskLimit = ref(20);
+const nativeTaskOffset = ref(0);
+const nativeQuerySubmitId = ref('');
+const nativeQueryDownload = ref(false);
+const nativeQueryDownloadDirName = ref('');
 
 const currentTab = ref('accounts');
 
@@ -182,6 +201,7 @@ const pageTitle = () => ({
   monitor: '运行监控',
   risk: '失败预检',
   tasks: '任务管理',
+  native: 'CLI 原生工具',
   docs: 'API 集成文档',
   settings: '管理员安全',
 }[currentTab.value] || '控制台');
@@ -192,6 +212,7 @@ const pageSubtitle = () => ({
   monitor: '查看账号轮询、创意产量、失败率和运行资源',
   risk: '提交前检查历史失败相似度，减少排队后的无效失败',
   tasks: '按状态、账号、提示词和错误原因追踪任务',
+  native: '按账号调用新版 CLI 的会话、任务列表和结果查询能力',
   docs: '查看当前服务暴露的 CLI 功能、参数和调用示例',
   settings: '修改后台访问密码和安全凭证',
 }[currentTab.value] || '');
@@ -206,12 +227,35 @@ const getAccountMetrics = (accountId: string) => {
   return row || { totalCreatives: 0, todayCreatives: 0, processingTasks: 0, todaySuccess: 0, failedTasks: 0, todayFailed: 0 };
 };
 
+const selectedNativeAccountName = () => accounts.value.find((item: any) => item.id === nativeAccountId.value)?.name || '';
+
+const nativeResultText = (result: any) => {
+  if (!result) return '';
+  const parts = [];
+  if (result.elapsedMs !== undefined) parts.push(`elapsed: ${result.elapsedMs}ms`);
+  if (result.command) parts.push(`$ ${result.command}`);
+  if (result.stdout) parts.push(result.stdout);
+  if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
+  if (result.parsed) parts.push(`parsed:\n${JSON.stringify(result.parsed, null, 2)}`);
+  if (result.downloadDir) parts.push(`downloadDir: ${result.downloadDir}`);
+  return parts.join('\n\n') || JSON.stringify(result, null, 2);
+};
+
+const ensureNativeAccount = () => {
+  if (nativeAccountId.value) return true;
+  nativeError.value = '请先选择一个已授权账号实例';
+  return false;
+};
+
 const fetchAccounts = async () => {
   try {
     const res = await authFetch('/admin/accounts');
     const data = await res.json();
     console.log('[fetchAccounts]', data);
     accounts.value = Array.isArray(data) ? data : [];
+    if (!nativeAccountId.value && accounts.value.length) {
+      nativeAccountId.value = accounts.value[0].id;
+    }
   } catch (error) {
     console.error("Failed to fetch accounts", error);
   }
@@ -654,6 +698,154 @@ const retryTask = async (id: string) => {
 
 const openTaskDetail = (task: any) => { taskDetail.value = task; };
 
+const fetchNativeSessions = async () => {
+  if (!ensureNativeAccount()) return;
+  nativeLoading.value = 'sessions';
+  nativeError.value = '';
+  try {
+    const params = new URLSearchParams({
+      accountId: nativeAccountId.value,
+      maxCount: String(nativeSessionMaxCount.value || 30),
+    });
+    const res = await authFetch(`/admin/native/sessions?${params}`);
+    const data = await res.json();
+    if (res.ok) nativeSessionsResult.value = data;
+    else nativeError.value = data.error || '查询 CLI 会话失败';
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
+const createNativeSession = async () => {
+  if (!ensureNativeAccount()) return;
+  nativeLoading.value = 'session-create';
+  nativeError.value = '';
+  try {
+    const res = await authFetch('/admin/native/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ accountId: nativeAccountId.value, name: nativeSessionName.value || undefined }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      nativeSessionsResult.value = data;
+      nativeSessionName.value = '';
+    } else {
+      nativeError.value = data.error || '创建 CLI 会话失败';
+    }
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
+const searchNativeSession = async () => {
+  if (!ensureNativeAccount()) return;
+  nativeLoading.value = 'session-search';
+  nativeError.value = '';
+  try {
+    const params = new URLSearchParams({
+      accountId: nativeAccountId.value,
+      name: nativeSessionSearchName.value,
+    });
+    const res = await authFetch(`/admin/native/sessions/search?${params}`);
+    const data = await res.json();
+    if (res.ok) nativeSessionsResult.value = data;
+    else nativeError.value = data.error || '搜索 CLI 会话失败';
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
+const renameNativeSession = async () => {
+  if (!ensureNativeAccount()) return;
+  nativeLoading.value = 'session-rename';
+  nativeError.value = '';
+  try {
+    const res = await authFetch(`/admin/native/sessions/${encodeURIComponent(nativeSessionId.value)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ accountId: nativeAccountId.value, name: nativeSessionNewName.value }),
+    });
+    const data = await res.json();
+    if (res.ok) nativeSessionsResult.value = data;
+    else nativeError.value = data.error || '重命名 CLI 会话失败';
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
+const deleteNativeSession = async () => {
+  if (!ensureNativeAccount()) return;
+  if (!nativeSessionId.value || !confirm(`确认删除 CLI 会话 ${nativeSessionId.value}？历史会被 CLI 移回默认会话。`)) return;
+  nativeLoading.value = 'session-delete';
+  nativeError.value = '';
+  try {
+    const res = await authFetch(`/admin/native/sessions/${encodeURIComponent(nativeSessionId.value)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ accountId: nativeAccountId.value }),
+    });
+    const data = await res.json();
+    if (res.ok) nativeSessionsResult.value = data;
+    else nativeError.value = data.error || '删除 CLI 会话失败';
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
+const fetchNativeTasks = async () => {
+  if (!ensureNativeAccount()) return;
+  nativeLoading.value = 'tasks';
+  nativeError.value = '';
+  try {
+    const params = new URLSearchParams({
+      accountId: nativeAccountId.value,
+      limit: String(nativeTaskLimit.value || 20),
+      offset: String(nativeTaskOffset.value || 0),
+    });
+    if (nativeTaskStatus.value) params.set('gen_status', nativeTaskStatus.value);
+    if (nativeTaskType.value) params.set('gen_task_type', nativeTaskType.value);
+    if (nativeTaskSubmitId.value) params.set('submit_id', nativeTaskSubmitId.value);
+    const res = await authFetch(`/admin/native/tasks?${params}`);
+    const data = await res.json();
+    if (res.ok) nativeTasksResult.value = data;
+    else nativeError.value = data.error || '查询 CLI 任务失败';
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
+const queryNativeResult = async () => {
+  if (!ensureNativeAccount()) return;
+  nativeLoading.value = 'query';
+  nativeError.value = '';
+  try {
+    const params = new URLSearchParams({
+      accountId: nativeAccountId.value,
+      submit_id: nativeQuerySubmitId.value,
+    });
+    if (nativeQueryDownload.value) params.set('download', '1');
+    if (nativeQueryDownloadDirName.value) params.set('downloadDirName', nativeQueryDownloadDirName.value);
+    const res = await authFetch(`/admin/native/query-result?${params}`);
+    const data = await res.json();
+    if (res.ok) nativeQueryResult.value = data;
+    else nativeError.value = data.error || '查询 CLI 原生结果失败';
+  } catch (e: any) {
+    nativeError.value = e.message;
+  } finally {
+    nativeLoading.value = '';
+  }
+};
+
 const statusLabel = (s: string) => ({ PENDING: '待处理', PROCESSING: '生成中', SUCCESS: '已完成', FAILED: '已失败' }[s] || s);
 const statusClass = (s: string) => ({
   PENDING: 'bg-slate-100 text-slate-500',
@@ -703,6 +895,7 @@ onMounted(() => {
         <button @click="currentTab = 'monitor'; fetchStats()" :class="currentTab === 'monitor' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>运行监控</span><span class="text-xs opacity-70">{{ processingTaskCount() }}</span></button>
         <button @click="currentTab = 'risk'" :class="currentTab === 'risk' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>失败预检</span><span class="text-xs opacity-70">{{ stats?.failures?.byPrompt?.length || 0 }}</span></button>
         <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>任务管理</span><span class="text-xs opacity-70">{{ taskTotal || stats?.tasks?.total || 0 }}</span></button>
+        <button @click="currentTab = 'native'" :class="currentTab === 'native' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>CLI 原生工具</span><span class="text-xs opacity-70">NEW</span></button>
         <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>API 集成文档</span><span class="text-xs opacity-70">CLI</span></button>
         <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition mt-4 flex items-center justify-between"><span>管理员安全</span><span class="text-xs opacity-70">Admin</span></button>
       </nav>
@@ -1229,6 +1422,97 @@ onMounted(() => {
         </div>
       </div>
 
+      <!-- ========== TAB: NATIVE CLI ========== -->
+      <div v-if="currentTab === 'native'" class="space-y-6">
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+          <div class="grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-5 items-end">
+            <div>
+              <label class="block text-sm font-bold text-slate-700 mb-2">执行账号</label>
+              <select v-model="nativeAccountId" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                <option value="">请选择账号实例</option>
+                <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }} · {{ acc.status }} · {{ acc.creditBalance ?? '?' }} 积分</option>
+              </select>
+              <p class="text-xs text-slate-400 mt-2">这些操作会在选中账号的隔离凭证下调用本机新版 dreamina CLI。</p>
+            </div>
+            <div class="rounded-xl bg-slate-50 border border-slate-100 px-4 py-3">
+              <p class="text-xs font-bold text-slate-500 uppercase">当前账号</p>
+              <p class="text-sm font-black text-slate-800 mt-1">{{ selectedNativeAccountName() || '-' }}</p>
+            </div>
+          </div>
+          <div v-if="nativeError" class="mt-4 bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ nativeError }}</div>
+        </div>
+
+        <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h3 class="font-black text-slate-900">Session 管理</h3>
+                <p class="text-xs text-slate-400 mt-1">对齐 CLI：session list/create/search/rename/delete</p>
+              </div>
+              <button @click="fetchNativeSessions" :disabled="nativeLoading === 'sessions'" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg font-bold text-sm">刷新会话</button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-3">
+              <input v-model.number="nativeSessionMaxCount" type="number" min="1" max="100" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="列表数量" />
+              <div class="flex gap-3">
+                <input v-model.trim="nativeSessionName" class="flex-1 border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="新会话名称，可留空自动命名" />
+                <button @click="createNativeSession" :disabled="nativeLoading === 'session-create'" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-4 py-2.5 rounded-lg text-sm font-bold">创建</button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
+              <input v-model.trim="nativeSessionSearchName" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="按会话名搜索" />
+              <button @click="searchNativeSession" :disabled="nativeLoading === 'session-search'" class="bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold">搜索</button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-[130px_1fr_auto_auto] gap-3">
+              <input v-model.trim="nativeSessionId" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="会话 ID" />
+              <input v-model.trim="nativeSessionNewName" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="新名称" />
+              <button @click="renameNativeSession" :disabled="nativeLoading === 'session-rename'" class="bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 px-4 py-2.5 rounded-lg text-sm font-bold">重命名</button>
+              <button @click="deleteNativeSession" :disabled="nativeLoading === 'session-delete'" class="bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-600 px-4 py-2.5 rounded-lg text-sm font-bold">删除</button>
+            </div>
+
+            <pre class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[180px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeSessionsResult) || '等待执行 session 命令...' }}</pre>
+          </div>
+
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+            <div>
+              <h3 class="font-black text-slate-900">CLI 任务列表</h3>
+              <p class="text-xs text-slate-400 mt-1">直接调用 list_task，可按原生状态、任务类型和 submit_id 过滤。</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input v-model.trim="nativeTaskStatus" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="gen_status，如 success" />
+              <input v-model.trim="nativeTaskType" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="gen_task_type，如 text2image" />
+              <input v-model.trim="nativeTaskSubmitId" class="md:col-span-2 border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="submit_id，可选" />
+              <input v-model.number="nativeTaskLimit" type="number" min="1" max="100" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="limit" />
+              <input v-model.number="nativeTaskOffset" type="number" min="0" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="offset" />
+            </div>
+            <button @click="fetchNativeTasks" :disabled="nativeLoading === 'tasks'" class="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl text-sm font-black">查询 CLI 任务</button>
+            <pre class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[220px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeTasksResult) || '等待执行 list_task...' }}</pre>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <div>
+              <h3 class="font-black text-slate-900">原生结果查询</h3>
+              <p class="text-xs text-slate-400 mt-1">直接调用 query_result。勾选下载时只允许保存到服务端 data/downloads 子目录。</p>
+            </div>
+            <button @click="queryNativeResult" :disabled="nativeLoading === 'query'" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-black">查询结果</button>
+          </div>
+          <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto_260px] gap-3 items-center">
+            <input v-model.trim="nativeQuerySubmitId" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="submit_id" />
+            <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600">
+              <input v-model="nativeQueryDownload" type="checkbox" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+              下载结果
+            </label>
+            <input v-model.trim="nativeQueryDownloadDirName" :disabled="!nativeQueryDownload" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50" placeholder="下载目录名，可选" />
+          </div>
+          <pre class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[220px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeQueryResult) || '等待执行 query_result...' }}</pre>
+        </div>
+      </div>
+
       <!-- ========== TAB: DOCS ========== -->
       <div v-if="currentTab === 'docs'" class="space-y-8">
         <div>
@@ -1377,14 +1661,14 @@ done</pre>
                 <th class="text-left px-4 py-3 font-bold text-blue-700 border border-blue-100">备注</th>
               </tr></thead>
               <tbody>
-                <tr class="bg-green-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">seedance2.0_vip</td><td class="px-4 py-3 border border-slate-100">4 – 15</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-bold">✅ 全支持</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-semibold">VIP 超极速</td></tr>
+                <tr class="bg-green-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">seedance2.0_vip</td><td class="px-4 py-3 border border-slate-100">4 – 15</td><td class="px-4 py-3 border border-slate-100">720p / 1080p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-bold">✅ 全支持</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-semibold">VIP 超极速</td></tr>
                 <tr class="bg-green-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">seedance2.0fast_vip</td><td class="px-4 py-3 border border-slate-100">4 – 15</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-bold">✅ 全支持</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-semibold">VIP 极速版</td></tr>
                 <tr><td class="px-4 py-3 font-mono font-bold border border-slate-100">seedance2.0</td><td class="px-4 py-3 border border-slate-100">4 – 15</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-bold">✅ 全支持</td><td class="px-4 py-3 border border-slate-100 text-slate-500">标准推荐</td></tr>
                 <tr class="bg-slate-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">seedance2.0fast</td><td class="px-4 py-3 border border-slate-100">4 – 15</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700 font-bold">✅ 全支持</td><td class="px-4 py-3 border border-slate-100 text-slate-500">快速出图</td></tr>
-                <tr class="bg-blue-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.5pro</td><td class="px-4 py-3 border border-slate-100">4 – 12</td><td class="px-4 py-3 border border-slate-100 font-bold text-blue-700">1080p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-blue-600">高清，无多模态</td></tr>
-                <tr><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.0pro</td><td class="px-4 py-3 border border-slate-100">3 – 10</td><td class="px-4 py-3 border border-slate-100 font-bold text-blue-700">1080p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-slate-500"></td></tr>
-                <tr class="bg-slate-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.0fast</td><td class="px-4 py-3 border border-slate-100">3 – 10</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-slate-500">快速版</td></tr>
-                <tr class="bg-orange-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.0</td><td class="px-4 py-3 border border-slate-100">3 – 10</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-orange-500">旧基础版</td></tr>
+                <tr class="bg-blue-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.5pro</td><td class="px-4 py-3 border border-slate-100">4 – 12</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅ 首·尾帧</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-blue-600">图生视频/首尾帧</td></tr>
+                <tr><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.0pro</td><td class="px-4 py-3 border border-slate-100">3 – 10</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅ 首帧</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-slate-500">图生视频</td></tr>
+                <tr class="bg-slate-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.0fast</td><td class="px-4 py-3 border border-slate-100">3 – 10</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅ 首帧</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-slate-500">图生视频快速版</td></tr>
+                <tr class="bg-orange-50"><td class="px-4 py-3 font-mono font-bold border border-slate-100">3.0</td><td class="px-4 py-3 border border-slate-100">3 – 10</td><td class="px-4 py-3 border border-slate-100">720p</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-green-700">✅ 首·尾帧</td><td class="px-4 py-3 border border-slate-100 text-red-500">❌</td><td class="px-4 py-3 border border-slate-100 text-orange-500">图生视频/首尾帧</td></tr>
               </tbody>
             </table>
           </div>

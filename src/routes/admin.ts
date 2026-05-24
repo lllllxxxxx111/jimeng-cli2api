@@ -15,6 +15,141 @@ const PROMPT_RISK_LIMIT = 8;
 const CHECKLOGIN_POLL_SECONDS = 3;
 const CHECKLOGIN_TIMEOUT_MS = 12000;
 const ACCOUNT_CHECK_TIMEOUT_MS = 30000;
+const NATIVE_CLI_TIMEOUT_MS = 60000;
+const NATIVE_CLI_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 5;
+const NATIVE_DOWNLOAD_ROOT = path.resolve(__dirname, '../../data/downloads');
+const SAFE_CLI_TOKEN = /^[A-Za-z0-9_.:-]+$/;
+const SAFE_SUBMIT_ID = /^[A-Za-z0-9_-]+$/;
+
+const shellQuote = (value: string): string => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+const getScalar = (value: unknown): string => {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw === undefined || raw === null ? '' : String(raw).trim();
+};
+
+const parseIntParam = (
+  value: unknown,
+  field: string,
+  options: { min: number; max: number; defaultValue: number }
+) => {
+  const text = getScalar(value);
+  if (!text) return options.defaultValue;
+  if (!/^-?\d+$/.test(text)) throw new Error(`${field} must be an integer`);
+  const parsed = Number(text);
+  if (parsed < options.min || parsed > options.max) {
+    throw new Error(`${field} must be between ${options.min} and ${options.max}`);
+  }
+  return parsed;
+};
+
+const validateSafeToken = (value: string, field: string, maxLength = 80) => {
+  const text = value.trim();
+  if (!text) throw new Error(`${field} is required`);
+  if (text.length > maxLength || !SAFE_CLI_TOKEN.test(text)) {
+    throw new Error(`${field} contains unsupported characters`);
+  }
+  return text;
+};
+
+const validateSubmitId = (value: string) => {
+  const text = value.trim();
+  if (!text) throw new Error('submit_id is required');
+  if (text.length > 128 || !SAFE_SUBMIT_ID.test(text)) {
+    throw new Error('submit_id contains unsupported characters');
+  }
+  return text;
+};
+
+const validateSessionName = (value: string, required: boolean) => {
+  const text = value.trim();
+  if (!text && !required) return '';
+  if (!text) throw new Error('session name is required');
+  if (text.length > 50) throw new Error('session name must be at most 50 characters');
+  return text;
+};
+
+const validateSessionId = (value: string) => {
+  const text = value.trim();
+  if (!/^\d+$/.test(text)) throw new Error('session_id must be a positive integer');
+  const id = Number(text);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error('session_id must be greater than 0');
+  }
+  return String(id);
+};
+
+const parseCliJson = (stdout: string) => {
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(stdout.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+};
+
+const parseNativeDownloadFlag = (value: unknown) => {
+  const text = getScalar(value).toLowerCase();
+  return text === '1' || text === 'true' || text === 'yes' || text === 'on';
+};
+
+const getSafeDownloadDir = (submitId: string, rawName: string) => {
+  const fallbackName = submitId.replace(/[^A-Za-z0-9_.-]/g, '_');
+  const cleanName = (rawName || fallbackName).replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 100) || fallbackName;
+  const target = path.resolve(NATIVE_DOWNLOAD_ROOT, cleanName);
+  if (target !== NATIVE_DOWNLOAD_ROOT && !target.startsWith(NATIVE_DOWNLOAD_ROOT + path.sep)) {
+    throw new Error('download directory is outside the allowed data/downloads folder');
+  }
+  fs.mkdirSync(target, { recursive: true });
+  return target;
+};
+
+const getAccountForNativeCli = async (accountId: string) => {
+  const id = getScalar(accountId);
+  if (!id) throw new Error('accountId is required');
+  const account = await prisma.jimengAccount.findUnique({ where: { id } });
+  if (!account) {
+    const error = new Error('account not found');
+    (error as any).statusCode = 404;
+    throw error;
+  }
+  return account;
+};
+
+const runNativeCli = async (accountId: string, command: string, timeoutMs = NATIVE_CLI_TIMEOUT_MS) => {
+  const account = await getAccountForNativeCli(accountId);
+  const startedAt = Date.now();
+  const { stdout, stderr } = await runJimengCommand(command, account.homeDir, false, timeoutMs);
+  return {
+    success: true,
+    accountId: account.id,
+    accountName: account.name,
+    command,
+    stdout,
+    stderr,
+    parsed: parseCliJson(stdout),
+    elapsedMs: Date.now() - startedAt,
+  };
+};
+
+const nativeCapabilities = {
+  session: {
+    exposed: true,
+    commands: ['list', 'create', 'search', 'rename', 'delete'],
+    note: 'Admin-only session management. Login/logout/help/version are intentionally not exposed to API clients.',
+  },
+  list_task: {
+    exposed: true,
+    filters: ['gen_status', 'gen_task_type', 'submit_id', 'limit', 'offset'],
+  },
+  query_result: {
+    exposed: true,
+    filters: ['submit_id'],
+    downloadRoot: NATIVE_DOWNLOAD_ROOT,
+  },
+};
 
 function normalizePromptForRisk(value: string) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -413,6 +548,110 @@ router.post('/accounts/:id/check', async (req: Request, res: Response) => {
       error: `账号检测失败 (可能未授权或凭证已过期)：\n${error.message}`,
       account: updatedAccount,
     });
+  }
+});
+
+router.get('/native/capabilities', async (_req: Request, res: Response) => {
+  res.json(nativeCapabilities);
+});
+
+router.get('/native/sessions', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.query.accountId);
+    const maxCount = parseIntParam(req.query.maxCount, 'maxCount', { min: 1, max: 100, defaultValue: 30 });
+    const result = await runNativeCli(accountId, `dreamina session list -n ${maxCount}`);
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+router.post('/native/sessions', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.body?.accountId);
+    const name = validateSessionName(getScalar(req.body?.name), false);
+    const command = name ? `dreamina session create ${shellQuote(name)}` : 'dreamina session create';
+    const result = await runNativeCli(accountId, command);
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+router.get('/native/sessions/search', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.query.accountId);
+    const name = validateSessionName(getScalar(req.query.name), true);
+    const result = await runNativeCli(accountId, `dreamina session search ${shellQuote(name)}`);
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+router.put('/native/sessions/:sessionId', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.body?.accountId);
+    const sessionId = validateSessionId(getScalar(req.params.sessionId));
+    const name = validateSessionName(getScalar(req.body?.name), true);
+    const result = await runNativeCli(accountId, `dreamina session rename ${sessionId} ${shellQuote(name)}`);
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+router.delete('/native/sessions/:sessionId', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.body?.accountId || req.query.accountId);
+    const sessionId = validateSessionId(getScalar(req.params.sessionId));
+    const result = await runNativeCli(accountId, `dreamina session delete ${sessionId}`);
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+router.get('/native/tasks', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.query.accountId);
+    const limit = parseIntParam(req.query.limit, 'limit', { min: 1, max: 100, defaultValue: 20 });
+    const offset = parseIntParam(req.query.offset, 'offset', { min: 0, max: 100000, defaultValue: 0 });
+    const genStatus = getScalar(req.query.gen_status);
+    const genTaskType = getScalar(req.query.gen_task_type);
+    const submitId = getScalar(req.query.submit_id);
+
+    const args = [`--limit=${limit}`, `--offset=${offset}`];
+    if (genStatus) args.push(`--gen_status=${validateSafeToken(genStatus, 'gen_status', 40)}`);
+    if (genTaskType) args.push(`--gen_task_type=${validateSafeToken(genTaskType, 'gen_task_type', 60)}`);
+    if (submitId) args.push(`--submit_id=${validateSubmitId(submitId)}`);
+
+    const result = await runNativeCli(accountId, `dreamina list_task ${args.join(' ')}`);
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+router.get('/native/query-result', async (req: Request, res: Response) => {
+  try {
+    const accountId = getScalar(req.query.accountId);
+    const submitId = validateSubmitId(getScalar(req.query.submit_id));
+    const args = [`--submit_id=${submitId}`];
+    let downloadDir: string | null = null;
+    if (parseNativeDownloadFlag(req.query.download)) {
+      downloadDir = getSafeDownloadDir(submitId, getScalar(req.query.downloadDirName));
+      args.push(`--download_dir=${shellQuote(downloadDir)}`);
+    }
+
+    const result = await runNativeCli(
+      accountId,
+      `dreamina query_result ${args.join(' ')}`,
+      downloadDir ? NATIVE_CLI_DOWNLOAD_TIMEOUT_MS : NATIVE_CLI_TIMEOUT_MS
+    );
+    res.json({ ...result, downloadDir });
+  } catch (error: any) {
+    res.status(error.statusCode || 400).json({ error: error.message });
   }
 });
 
