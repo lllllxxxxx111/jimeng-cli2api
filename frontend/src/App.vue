@@ -74,6 +74,24 @@ const nativeQuerySubmitId = ref('');
 const nativeQueryDownload = ref(false);
 const nativeQueryDownloadDirName = ref('');
 const nativeShowAdvancedSessions = ref(false);
+const sdkApiKey = ref(localStorage.getItem('sdk_test_api_key') || '');
+const sdkSelectedKeyId = ref('');
+const sdkMode = ref('models');
+const sdkPrompt = ref('一只赛博朋克机械猫，电影感灯光，细节丰富');
+const sdkImageModel = ref('5.0');
+const sdkVideoModel = ref('sora-2');
+const sdkRatio = ref('16:9');
+const sdkResolution = ref('2k');
+const sdkVideoSize = ref('1280x720');
+const sdkVideoSeconds = ref(5);
+const sdkVideoResolution = ref('720p');
+const sdkSession = ref('');
+const sdkMetadataJson = ref('');
+const sdkResponse = ref<any>(null);
+const sdkPollResponse = ref<any>(null);
+const sdkLoading = ref(false);
+const sdkPolling = ref(false);
+const sdkError = ref('');
 
 const currentTab = ref('monitor');
 
@@ -85,6 +103,7 @@ const tabMeta: Record<string, { title: string; subtitle: string }> = {
   risk: { title: '失败预检', subtitle: '提交前比对历史失败提示词' },
   native: { title: '原生工具', subtitle: '面向管理员的 CLI 会话、任务和结果查询' },
   docs: { title: '集成文档', subtitle: '查看 OpenAI SDK 兼容入口和即梦扩展参数' },
+  sdkTest: { title: '接口测试', subtitle: '直接测试 OpenAI SDK 兼容接口和轮询结果' },
   settings: { title: '管理员安全', subtitle: '修改后台访问密码' },
 };
 
@@ -298,6 +317,7 @@ const navGroups = [
   {
     title: '集成',
     items: [
+      { key: 'sdkTest', label: '接口测试', badge: 'TRY' },
       { key: 'docs', label: '接口文档', badge: 'SDK' },
       { key: 'native', label: '原生工具', badge: 'CLI' },
     ],
@@ -373,6 +393,361 @@ const nativeResultSummary = (result: any) => {
     submitId: result.submit_id || result.submitId || parsed.submit_id || parsed.task_id || '',
     raw: text,
   };
+};
+
+const jsonText = (value: any) => value ? JSON.stringify(value, null, 2) : '';
+
+const selectedSdkKey = () => apikeys.value.find((item: any) => item.id === sdkSelectedKeyId.value);
+
+const activeSdkApiKey = () => {
+  const pasted = sdkApiKey.value.trim();
+  if (pasted) return pasted;
+  return canUseSelectedSdkKey() ? selectedSdkKey()?.key || '' : '';
+};
+
+const canUseSelectedSdkKey = () => {
+  const key = selectedSdkKey();
+  return Boolean(key?.key && !String(key.key).includes('*'));
+};
+
+const saveSdkApiKey = () => {
+  const key = sdkApiKey.value.trim();
+  if (key) {
+    localStorage.setItem('sdk_test_api_key', key);
+    successMessage.value = '测试 API Key 已保存到本机浏览器';
+  } else {
+    localStorage.removeItem('sdk_test_api_key');
+    successMessage.value = '已清空本机保存的测试 API Key';
+  }
+};
+
+const useSelectedSdkKey = () => {
+  const key = selectedSdkKey();
+  if (!key) return;
+  if (!canUseSelectedSdkKey()) {
+    sdkError.value = '这个 Key 是脱敏显示，不能直接用于测试。请粘贴完整 Key，或新签发一个 Key 后立即复制。';
+    return;
+  }
+  sdkApiKey.value = key.key;
+  sdkError.value = '';
+};
+
+const sdkModeLabel = () => ({
+  'models': '模型列表',
+  'responses-image': 'Responses 文生图',
+  'responses-video': 'Responses 生视频',
+  'videos-create': 'Videos SDK',
+  'legacy-image': '老接口生图',
+  'legacy-video': '老接口生视频',
+}[sdkMode.value] || sdkMode.value);
+
+const parseSdkMetadata = () => {
+  if (!sdkMetadataJson.value.trim()) return {};
+  try {
+    return JSON.parse(sdkMetadataJson.value);
+  } catch (error: any) {
+    throw new Error('扩展 metadata 不是合法 JSON: ' + error.message);
+  }
+};
+
+const parseSdkSession = () => {
+  if (sdkSession.value === '') return undefined;
+  const session = Number(sdkSession.value);
+  if (!Number.isInteger(session) || session < 0) {
+    throw new Error('CLI session 必须是大于等于 0 的整数');
+  }
+  return session;
+};
+
+const sdkEndpoint = () => {
+  if (sdkMode.value === 'models') return { method: 'GET', path: '/v1/models', contentType: 'json' };
+  if (sdkMode.value === 'responses-image' || sdkMode.value === 'responses-video') return { method: 'POST', path: '/v1/responses', contentType: 'json' };
+  if (sdkMode.value === 'videos-create') return { method: 'POST', path: '/v1/videos', contentType: 'json' };
+  if (sdkMode.value === 'legacy-image') return { method: 'POST', path: '/v1/images/generations', contentType: 'form' };
+  return { method: 'POST', path: '/v1/videos/generations', contentType: 'form' };
+};
+
+const sdkBaseUrl = () => `${window.location.origin}/v1`;
+
+const buildSdkPayload = () => {
+  if (sdkMode.value === 'models') return null;
+  const extra = parseSdkMetadata();
+  const session = parseSdkSession();
+
+  if (sdkMode.value === 'responses-image') {
+    return {
+      model: sdkImageModel.value,
+      input: sdkPrompt.value,
+      tools: [{ type: 'image_generation' }],
+      metadata: {
+        ratio: sdkRatio.value,
+        resolution_type: sdkResolution.value || undefined,
+        session,
+        ...extra,
+      },
+    };
+  }
+
+  if (sdkMode.value === 'responses-video') {
+    return {
+      model: sdkVideoModel.value,
+      input: sdkPrompt.value,
+      metadata: {
+        operation: 'text2video',
+        duration: Number(sdkVideoSeconds.value) || 5,
+        ratio: sdkRatio.value,
+        video_resolution: sdkVideoResolution.value || undefined,
+        session,
+        ...extra,
+      },
+    };
+  }
+
+  if (sdkMode.value === 'videos-create') {
+    return {
+      model: sdkVideoModel.value,
+      prompt: sdkPrompt.value,
+      size: sdkVideoSize.value,
+      seconds: Number(sdkVideoSeconds.value) || 5,
+      metadata: {
+        video_resolution: sdkVideoResolution.value || undefined,
+        session,
+        ...extra,
+      },
+    };
+  }
+
+  const body: Record<string, any> = sdkMode.value === 'legacy-image'
+    ? {
+        model: sdkImageModel.value,
+        prompt: sdkPrompt.value,
+        ratio: sdkRatio.value,
+        resolution_type: sdkResolution.value,
+        session,
+        ...extra,
+      }
+    : {
+        model: sdkVideoModel.value,
+        prompt: sdkPrompt.value,
+        mode: 'text2video',
+        duration: Number(sdkVideoSeconds.value) || 5,
+        ratio: sdkRatio.value,
+        video_resolution: sdkVideoResolution.value || undefined,
+        session,
+        ...extra,
+      };
+  return Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined && value !== ''));
+};
+
+const appendSdkFormValue = (form: FormData, key: string, value: any) => {
+  if (value === undefined || value === null || value === '') return;
+  if (Array.isArray(value)) {
+    for (const item of value) appendSdkFormValue(form, key, item);
+    return;
+  }
+  if (typeof value === 'object') {
+    form.append(key, JSON.stringify(value));
+    return;
+  }
+  form.append(key, String(value));
+};
+
+const sdkRequestPreview = () => {
+  try {
+    const endpoint = sdkEndpoint();
+    const payload = buildSdkPayload();
+    return {
+      method: endpoint.method,
+      url: `${window.location.origin}${endpoint.path}`,
+      headers: {
+        Authorization: 'Bearer sk-jm-...',
+        ...(endpoint.contentType === 'json' && endpoint.method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: payload,
+    };
+  } catch (error: any) {
+    return { error: error.message };
+  }
+};
+
+const sdkSnippet = () => {
+  try {
+    const clientInit = `import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: "sk-jm-...",
+  baseURL: "${sdkBaseUrl()}",
+});`;
+
+    if (sdkMode.value === 'models') {
+      return `${clientInit}
+
+const models = await client.models.list();`;
+    }
+    if (sdkMode.value === 'responses-image') {
+      return `${clientInit}
+
+const resp = await client.responses.create(${JSON.stringify(buildSdkPayload(), null, 2)});
+
+const latest = await client.responses.retrieve(resp.id);`;
+    }
+    if (sdkMode.value === 'responses-video') {
+      return `${clientInit}
+
+const resp = await client.responses.create(${JSON.stringify(buildSdkPayload(), null, 2)});
+
+const latest = await client.responses.retrieve(resp.id);`;
+    }
+    if (sdkMode.value === 'videos-create') {
+      return `${clientInit}
+
+const video = await client.videos.create(${JSON.stringify(buildSdkPayload(), null, 2)});
+
+const latest = await client.videos.retrieve(video.id);`;
+    }
+    const endpoint = sdkEndpoint();
+    const payload = buildSdkPayload() || {};
+    const fields = Object.entries(payload)
+      .flatMap(([key, value]) => {
+        const values = Array.isArray(value) ? value : [value];
+        return values
+          .filter(item => item !== undefined && item !== null && item !== '')
+          .map(item => `form.append(${JSON.stringify(key)}, ${JSON.stringify(typeof item === 'object' ? JSON.stringify(item) : String(item))});`);
+      })
+      .join('\n');
+    return `const form = new FormData();
+${fields}
+
+const resp = await fetch("${window.location.origin}${endpoint.path}", {
+  method: "POST",
+  headers: { Authorization: "Bearer sk-jm-..." },
+  body: form,
+});`;
+  } catch (error: any) {
+    return `// ${error.message}`;
+  }
+};
+
+const extractTaskIdFromSdkResponse = (value: any) => {
+  if (!value) return '';
+  const rawId = String(value.id || '');
+  if (rawId.startsWith('resp_')) return rawId.slice(5);
+  if (rawId.startsWith('video_')) return rawId.slice(6);
+  return value.metadata?.task_id || value.task_id || value.id || '';
+};
+
+const pollPathForSdkResponse = (value: any) => {
+  if (!value?.id) return '';
+  const id = String(value.id);
+  if (id.startsWith('resp_')) return `/v1/responses/${encodeURIComponent(id)}`;
+  if (id.startsWith('video_')) return `/v1/videos/${encodeURIComponent(id)}`;
+  const taskId = extractTaskIdFromSdkResponse(value);
+  return taskId ? `/v1/tasks/${encodeURIComponent(taskId)}` : '';
+};
+
+const callOpenAiApi = async (path: string, options: any = {}) => {
+  const key = activeSdkApiKey();
+  if (!key) throw new Error('请先选择或粘贴一个完整 API Key');
+  const headers: Record<string, string> = {
+    ...(options.headers || {}),
+    Authorization: `Bearer ${key}`,
+  };
+  if (options.json !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(options.json);
+  }
+  delete options.json;
+  const res = await fetch(path, { ...options, headers });
+  const text = await res.text();
+  let data: any = text;
+  try { data = text ? JSON.parse(text) : null; } catch {}
+  if (!res.ok) {
+    const message = data?.error?.message || data?.error || text || `HTTP ${res.status}`;
+    const error = new Error(message);
+    (error as any).response = data;
+    throw error;
+  }
+  return data;
+};
+
+const runSdkTest = async () => {
+  sdkLoading.value = true;
+  sdkError.value = '';
+  sdkResponse.value = null;
+  sdkPollResponse.value = null;
+  try {
+    const endpoint = sdkEndpoint();
+    let data: any;
+    if (endpoint.method === 'GET') {
+      data = await callOpenAiApi(endpoint.path, { method: 'GET' });
+    } else if (endpoint.contentType === 'json') {
+      data = await callOpenAiApi(endpoint.path, { method: endpoint.method, json: buildSdkPayload() });
+    } else {
+      const payload = buildSdkPayload() || {};
+      const form = new FormData();
+      for (const [key, value] of Object.entries(payload)) {
+        appendSdkFormValue(form, key, value);
+      }
+      data = await callOpenAiApi(endpoint.path, { method: endpoint.method, body: form });
+    }
+    sdkResponse.value = data;
+  } catch (error: any) {
+    sdkError.value = error.message || '接口测试失败';
+    if (error.response) sdkResponse.value = error.response;
+  } finally {
+    sdkLoading.value = false;
+  }
+};
+
+const pollSdkResult = async () => {
+  const path = pollPathForSdkResponse(sdkResponse.value);
+  if (!path) {
+    sdkError.value = '当前响应里没有可轮询的任务 ID';
+    return;
+  }
+  sdkPolling.value = true;
+  sdkError.value = '';
+  try {
+    sdkPollResponse.value = await callOpenAiApi(path, { method: 'GET' });
+  } catch (error: any) {
+    sdkError.value = error.message || '轮询失败';
+    if (error.response) sdkPollResponse.value = error.response;
+  } finally {
+    sdkPolling.value = false;
+  }
+};
+
+const clearSdkResult = () => {
+  sdkResponse.value = null;
+  sdkPollResponse.value = null;
+  sdkError.value = '';
+};
+
+const openTaskById = async (id: string) => {
+  if (!id) return;
+  try {
+    const res = await authFetch(`/admin/tasks/${encodeURIComponent(id)}`);
+    const data = await res.json();
+    if (res.ok) {
+      currentTab.value = 'tasks';
+      taskDetail.value = data;
+      await fetchTasks(1);
+    } else {
+      errorMessage.value = data.error || '任务详情加载失败';
+    }
+  } catch (error: any) {
+    errorMessage.value = error.message || '任务详情加载失败';
+  }
+};
+
+const openSdkTaskInAdmin = () => {
+  const taskId = extractTaskIdFromSdkResponse(sdkResponse.value);
+  if (!taskId) return;
+  taskFilterStatus.value = '';
+  taskFilterPrompt.value = '';
+  taskFilterError.value = '';
+  taskFilterAccountId.value = '';
+  openTaskById(taskId);
 };
 
 const nativeCopy = async (text: string) => {
@@ -1730,6 +2105,201 @@ onMounted(() => {
           </div>
 
           <pre v-if="nativeSessionsResult" class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[180px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeSessionsResult) }}</pre>
+        </div>
+      </div>
+
+      <!-- ========== TAB: SDK TEST ========== -->
+      <div v-if="currentTab === 'sdkTest'" class="space-y-6">
+        <div class="bg-white border border-slate-200 shadow-sm p-6">
+          <div class="grid grid-cols-1 2xl:grid-cols-[1fr_360px] gap-6">
+            <div class="space-y-5">
+              <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+                <div>
+                  <p class="text-xs font-black text-indigo-600 uppercase tracking-wider">OpenAI SDK Test</p>
+                  <h3 class="text-2xl font-black text-slate-900 mt-1">接口测试台</h3>
+                  <p class="text-sm text-slate-500 mt-2 leading-6">这里直接调用当前服务的 <code class="bg-slate-100 px-1 rounded font-mono">/v1</code> 接口。生成类请求会消耗账号额度，建议先用“模型列表”验证 Key。</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button @click="runSdkTest" :disabled="sdkLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkLoading ? '请求中...' : '发送测试请求' }}</button>
+                  <button @click="pollSdkResult" :disabled="sdkPolling || !pollPathForSdkResponse(sdkResponse)" class="bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkPolling ? '轮询中...' : '轮询结果' }}</button>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 xl:grid-cols-[260px_1fr] gap-4">
+                <div>
+                  <label class="block text-sm font-bold text-slate-700 mb-2">测试模式</label>
+                  <select v-model="sdkMode" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="models">GET /v1/models</option>
+                    <option value="responses-image">Responses 文生图</option>
+                    <option value="responses-video">Responses 文生视频</option>
+                    <option value="videos-create">OpenAI Videos 创建</option>
+                    <option value="legacy-image">老接口 /images/generations</option>
+                    <option value="legacy-video">老接口 /videos/generations</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-bold text-slate-700 mb-2">测试 API Key</label>
+                  <div class="grid grid-cols-1 xl:grid-cols-[240px_1fr_auto] gap-3">
+                    <select v-model="sdkSelectedKeyId" class="border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                      <option value="">从已签发 Key 选择</option>
+                      <option v-for="key in apikeys" :key="key.id" :value="key.id">{{ key.owner }} · {{ key.isActive ? '启用' : '停用' }}{{ key.boundAccount ? ' · ' + key.boundAccount.name : '' }}</option>
+                    </select>
+                    <input v-model.trim="sdkApiKey" type="password" class="border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" placeholder="粘贴完整 sk-jm-...；脱敏 Key 不能测试" />
+                    <div class="flex gap-2">
+                      <button @click="useSelectedSdkKey" class="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-4 py-3 rounded-xl text-sm font-bold">使用所选</button>
+                      <button @click="saveSdkApiKey" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-3 rounded-xl text-sm font-bold">保存</button>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-400 mt-2">如果列表里的 Key 已脱敏，只能用于识别，不能直接发送请求。新签发后立即复制到这里即可测试。</p>
+                </div>
+              </div>
+
+              <div v-if="sdkMode !== 'models'" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div class="xl:col-span-2">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">Prompt / input</label>
+                  <textarea v-model="sdkPrompt" rows="4" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white resize-y leading-6"></textarea>
+                </div>
+                <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">图片模型</label>
+                  <select v-model="sdkImageModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="5.0">5.0</option>
+                    <option value="4.6">4.6</option>
+                    <option value="4.5">4.5</option>
+                    <option value="4.1">4.1</option>
+                    <option value="4.0">4.0</option>
+                    <option value="3.1">3.1</option>
+                    <option value="3.0">3.0</option>
+                  </select>
+                </div>
+                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">视频模型</label>
+                  <select v-model="sdkVideoModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="sora-2">sora-2 → seedance2.0fast</option>
+                    <option value="sora-2-pro">sora-2-pro → seedance2.0_vip</option>
+                    <option value="seedance2.0fast">seedance2.0fast</option>
+                    <option value="seedance2.0">seedance2.0</option>
+                    <option value="seedance2.0_vip">seedance2.0_vip</option>
+                    <option value="seedance2.0fast_vip">seedance2.0fast_vip</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-bold text-slate-700 mb-2">比例</label>
+                  <select v-model="sdkRatio" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="16:9">16:9</option>
+                    <option value="9:16">9:16</option>
+                    <option value="1:1">1:1</option>
+                    <option value="4:3">4:3</option>
+                    <option value="3:4">3:4</option>
+                    <option value="21:9">21:9</option>
+                  </select>
+                </div>
+                <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">图片清晰度</label>
+                  <select v-model="sdkResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="2k">2k</option>
+                    <option value="4k">4k</option>
+                  </select>
+                </div>
+                <div v-if="sdkMode === 'videos-create'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">SDK size</label>
+                  <select v-model="sdkVideoSize" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="1280x720">1280x720</option>
+                    <option value="720x1280">720x1280</option>
+                  </select>
+                </div>
+                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">视频秒数</label>
+                  <input v-model.number="sdkVideoSeconds" type="number" min="3" max="15" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
+                </div>
+                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">视频清晰度</label>
+                  <select v-model="sdkVideoResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option value="">默认</option>
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-bold text-slate-700 mb-2">CLI session</label>
+                  <input v-model.trim="sdkSession" type="number" min="0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" placeholder="可选，不填走默认会话" />
+                </div>
+                <div class="xl:col-span-2">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">额外 metadata JSON</label>
+                  <textarea v-model="sdkMetadataJson" rows="4" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white font-mono resize-y" placeholder='例如 {"operation":"image_upscale"}'></textarea>
+                </div>
+              </div>
+
+              <div v-if="sdkError" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ sdkError }}</div>
+            </div>
+
+            <div class="space-y-4">
+              <div class="bg-slate-950 text-white p-5">
+                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">当前请求</p>
+                <p class="text-xl font-black mt-2">{{ sdkModeLabel() }}</p>
+                <p class="text-xs text-slate-400 mt-2 font-mono">{{ sdkEndpoint().method }} {{ sdkEndpoint().path }}</p>
+                <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
+                  <div class="bg-white/10 p-3 rounded-lg">
+                    <p class="text-slate-400">账号</p>
+                    <p class="font-black mt-1">{{ availableAccountCount() }}</p>
+                  </div>
+                  <div class="bg-white/10 p-3 rounded-lg">
+                    <p class="text-slate-400">Key</p>
+                    <p class="font-black mt-1">{{ activeSdkApiKey() ? '已配置' : '未配置' }}</p>
+                  </div>
+                </div>
+              </div>
+              <div class="bg-amber-50 border border-amber-100 p-4 text-sm text-amber-800 leading-6">
+                <p class="font-black mb-1">测试提示</p>
+                <p>“模型列表”不消耗额度。Responses、Videos 和老接口会提交真实生成任务，并占用一个即梦账号执行。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-black text-slate-900">OpenAI SDK 示例</h3>
+              <button @click="nativeCopy(sdkSnippet())" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+            </div>
+            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ sdkSnippet() }}</pre>
+          </div>
+
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-black text-slate-900">请求预览</h3>
+              <button @click="nativeCopy(jsonText(sdkRequestPreview()))" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+            </div>
+            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkRequestPreview()) }}</pre>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 class="font-black text-slate-900">提交响应</h3>
+                <p class="text-xs text-slate-400 mt-1">返回 resp_、video_ 或 task id 后可继续轮询</p>
+              </div>
+              <div class="flex gap-2">
+                <button v-if="extractTaskIdFromSdkResponse(sdkResponse)" @click="openSdkTaskInAdmin" class="text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">去任务页</button>
+                <button @click="clearSdkResult" :disabled="!sdkResponse && !sdkPollResponse && !sdkError" class="text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">清空</button>
+                <button @click="nativeCopy(jsonText(sdkResponse))" :disabled="!sdkResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>
+              </div>
+            </div>
+            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[280px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkResponse) || '还没有响应。先点击“发送测试请求”。' }}</pre>
+          </div>
+
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 class="font-black text-slate-900">轮询响应</h3>
+                <p class="text-xs text-slate-400 mt-1">{{ pollPathForSdkResponse(sdkResponse) || '提交成功后显示轮询地址' }}</p>
+              </div>
+              <button @click="nativeCopy(jsonText(sdkPollResponse))" :disabled="!sdkPollResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>
+            </div>
+            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[280px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkPollResponse) || '提交后点击“轮询结果”，查看任务是否 success / failed。' }}</pre>
+          </div>
         </div>
       </div>
 
