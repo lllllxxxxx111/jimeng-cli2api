@@ -12,6 +12,9 @@ const router = Router();
 const prisma = new PrismaClient();
 const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
 const PROMPT_RISK_LIMIT = 8;
+const CHECKLOGIN_POLL_SECONDS = 3;
+const CHECKLOGIN_TIMEOUT_MS = 12000;
+const ACCOUNT_CHECK_TIMEOUT_MS = 30000;
 
 function normalizePromptForRisk(value: string) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -291,6 +294,7 @@ router.get('/accounts/:id/login-context', async (req: Request, res: Response) =>
 // OAuth checklogin：用 device_code 确认授权完成
 router.post('/accounts/:id/checklogin', async (req: Request, res: Response) => {
   try {
+    const startedAt = Date.now();
     const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id as string } });
     if (!account) return res.status(404).json({ error: '账号不存在' });
 
@@ -301,15 +305,20 @@ router.post('/accounts/:id/checklogin', async (req: Request, res: Response) => {
     try {
       // saveBackup=true: checklogin 成功写入 credential 后立即在锁内备份，防止其他账号在锁释放前抢占
       const { stdout, stderr } = await runJimengCommand(
-        `dreamina login checklogin --device_code=${deviceCode} --poll=60`,
+        `dreamina login checklogin --device_code=${deviceCode} --poll=${CHECKLOGIN_POLL_SECONDS}`,
         account.homeDir,
-        true  // saveBackup
+        true,  // saveBackup
+        CHECKLOGIN_TIMEOUT_MS
       );
       checkOutput = stdout + stderr;
     } catch (e: any) {
       checkOutput = String(e.message || '');
       if (checkOutput.includes('authorization_pending') || checkOutput.includes('pending')) {
-        return res.status(202).json({ pending: true, message: '用户尚未在浏览器完成授权，请完成后再点击确认。' });
+        return res.status(202).json({
+          pending: true,
+          elapsedMs: Date.now() - startedAt,
+          message: '用户尚未在浏览器完成授权，请完成后再点击确认。',
+        });
       }
       throw e;
     }
@@ -317,10 +326,10 @@ router.post('/accounts/:id/checklogin', async (req: Request, res: Response) => {
     console.log(`[Checklogin output]: ${checkOutput}`);
 
     try {
-      const { stdout: creditOut } = await runJimengCommand('dreamina user_credit', account.homeDir);
+      const { stdout: creditOut } = await runJimengCommand('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
       if (creditOut && creditOut.includes('credit')) {
         await prisma.jimengAccount.update({ where: { id: account.id }, data: { status: 'IDLE' } });
-        return res.json({ success: true, output: creditOut });
+        return res.json({ success: true, output: creditOut, elapsedMs: Date.now() - startedAt });
       }
     } catch {}
 
@@ -362,11 +371,12 @@ router.delete('/accounts/:id', async (req: Request, res: Response) => {
 // 测试连通性并获取余额 (依赖手册中的 `dreamina user_credit` 命令)
 router.post('/accounts/:id/check', async (req: Request, res: Response) => {
   try {
+    const startedAt = Date.now();
     const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id as string } });
     if (!account) return res.status(404).json({ error: "账号不存在" });
 
     // 运行验活及查余额命令
-    const { stdout } = await runJimengCommand('dreamina user_credit', account.homeDir);
+    const { stdout } = await runJimengCommand('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
     
     // 解析具体的算力数值 (CLI 返回的其实是 JSON，包含多种点数如 total_credit/vip_credit 等)
     let newBalance = account.creditBalance;
@@ -389,7 +399,7 @@ router.post('/accounts/:id/check', async (req: Request, res: Response) => {
       data: { status: account.status === 'NO_VIP' ? 'NO_VIP' : 'IDLE', creditBalance: newBalance, lastChecked: new Date() }
     });
 
-    res.json({ success: true, raw: stdout, account: updatedAccount });
+    res.json({ success: true, raw: stdout, account: updatedAccount, elapsedMs: Date.now() - startedAt });
   } catch (error: any) {
     const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id as string } });
     const updatedAccount = account

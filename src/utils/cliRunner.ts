@@ -279,7 +279,8 @@ export function generateFreshCredential(accountHomeDir: string): void {
 export const runJimengCommand = async (
   command: string,
   accountHomeDir?: string,
-  saveBackup: boolean = false
+  saveBackup: boolean = false,
+  timeoutMs: number = 1000 * 60 * 5
 ): Promise<CliRunResult> => {
   const resolvedCommand = command.replace(/^dreamina\b/, DREAMINA_BIN_QUOTED);
 
@@ -297,7 +298,7 @@ export const runJimengCommand = async (
     try {
       const { stdout, stderr } = await execAsync(resolvedCommand, { 
         env,
-        timeout: 1000 * 60 * 5,
+        timeout: timeoutMs,
       });
       // saveBackup=true 时在互斥锁内立即备份，防止其他账号在锁释放前抢占覆盖
       if (saveBackup && accountHomeDir) {

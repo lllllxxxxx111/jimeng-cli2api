@@ -258,7 +258,7 @@ function generateFreshCredential(accountHomeDir) {
  * 核心调度器：使用独立的环境变量 HOME/USERPROFILE 欺骗 CLI 去隔离文件夹中读取数据
  * 同时通过 withCredSwap 保证每次执行时使用正确账号的 credential.json
  */
-const runJimengCommand = async (command, accountHomeDir, saveBackup = false) => {
+const runJimengCommand = async (command, accountHomeDir, saveBackup = false, timeoutMs = 1000 * 60 * 5) => {
     const resolvedCommand = command.replace(/^dreamina\b/, DREAMINA_BIN_QUOTED);
     const env = { ...process.env };
     if (accountHomeDir) {
@@ -272,7 +272,7 @@ const runJimengCommand = async (command, accountHomeDir, saveBackup = false) => 
         try {
             const { stdout, stderr } = await execAsync(resolvedCommand, {
                 env,
-                timeout: 1000 * 60 * 5,
+                timeout: timeoutMs,
             });
             // saveBackup=true 时在互斥锁内立即备份，防止其他账号在锁释放前抢占覆盖
             if (saveBackup && accountHomeDir) {

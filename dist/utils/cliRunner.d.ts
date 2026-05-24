@@ -44,7 +44,7 @@ export declare function generateFreshCredential(accountHomeDir: string): void;
  * 核心调度器：使用独立的环境变量 HOME/USERPROFILE 欺骗 CLI 去隔离文件夹中读取数据
  * 同时通过 withCredSwap 保证每次执行时使用正确账号的 credential.json
  */
-export declare const runJimengCommand: (command: string, accountHomeDir?: string, saveBackup?: boolean) => Promise<CliRunResult>;
+export declare const runJimengCommand: (command: string, accountHomeDir?: string, saveBackup?: boolean, timeoutMs?: number) => Promise<CliRunResult>;
 /**
  * 在已持有 withCredSwap mutex 的情况下直接执行命令（跳过 mutex + token swap）。
  * 仅供 pollingDaemon 在已完成 swap 的上下文中并发调用同一账号的多条查询命令。

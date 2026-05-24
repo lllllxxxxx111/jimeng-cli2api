@@ -226,7 +226,8 @@ const checkAccount = async (id: string) => {
     if (res.ok && data.account) {
       const index = accounts.value.findIndex((a: any) => a.id === id);
       if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
-      successMessage.value = `账号状态已刷新：${data.account.name}`;
+      const seconds = data.elapsedMs ? `，耗时 ${(data.elapsedMs / 1000).toFixed(1)} 秒` : '';
+      successMessage.value = `账号状态已刷新：${data.account.name}${seconds}`;
     } else {
       if (data.account) {
         const index = accounts.value.findIndex((a: any) => a.id === id);
@@ -342,11 +343,12 @@ const doCheckLogin = async () => {
     });
     const data = await res.json();
     if (res.status === 202 && data.pending) {
-      alert('您尚未在浏览器完成授权，请先打开授权链接完成验证后再点击确认。');
+      errorMessage.value = data.message || '您尚未在浏览器完成授权，请先打开授权链接完成验证后再点击确认。';
       return;
     }
     if (res.ok && data.success) {
-      successMessage.value = `账号 "${oauthModal.value.accountName}" 授权成功！`;
+      const seconds = data.elapsedMs ? `，耗时 ${(data.elapsedMs / 1000).toFixed(1)} 秒` : '';
+      successMessage.value = `账号 "${oauthModal.value.accountName}" 授权成功${seconds}`;
       oauthModal.value.show = false;
       await fetchAccounts();
     } else {
@@ -818,10 +820,11 @@ onMounted(() => {
           </div>
 
           <!-- 底部按钮 -->
+          <div v-if="checkLoginLoading" class="px-6 pb-3 text-xs text-amber-600">正在调用即梦 CLI 确认授权，通常几秒内返回。未完成网页授权时不会长时间卡住。</div>
           <div class="px-6 pb-6 flex gap-3">
             <button @click="closeOAuthModal" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 transition">取消</button>
             <button @click="doCheckLogin" :disabled="checkLoginLoading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
-              {{ checkLoginLoading ? '确认中...' : '✅ 我已完成授权' }}
+              {{ checkLoginLoading ? '确认授权中...' : '✅ 我已完成授权' }}
             </button>
           </div>
         </div>
@@ -1099,7 +1102,7 @@ onMounted(() => {
                 任务
               </button>
               <button @click="checkAccount(acc.id)" :disabled="checkingId === acc.id" class="text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
-                {{ checkingId === acc.id ? '⏳' : '🔍' }} 检测状态
+                {{ checkingId === acc.id ? '⏳ CLI 查询中' : '🔍 检测状态' }}
               </button>
               <button @click="reloginAccount(acc.id, acc.name)" :disabled="reloginLoadingId === acc.id" class="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ reloginLoadingId === acc.id ? '⏳' : '🔗' }} 重新授权
