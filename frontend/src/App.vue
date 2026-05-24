@@ -691,12 +691,12 @@ onMounted(() => {
       </nav>
       <div class="rounded-2xl bg-slate-900 border border-white/10 p-4 mb-4">
         <div class="flex items-center justify-between text-xs text-slate-400">
-          <span>可用账号</span>
-          <span class="font-mono text-emerald-300">{{ availableAccountCount() }}</span>
+          <span>服务端口</span>
+          <span class="font-mono text-indigo-300">3000</span>
         </div>
         <div class="flex items-center justify-between text-xs text-slate-400 mt-2">
-          <span>今日成功</span>
-          <span class="font-mono text-indigo-300">{{ todaySuccessCount() }}</span>
+          <span>运行状态</span>
+          <span class="font-mono text-emerald-300">ONLINE</span>
         </div>
       </div>
       <button @click="doLogout" class="w-full bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-300 py-3 rounded-xl font-bold transition">退出系统</button>
@@ -797,11 +797,7 @@ onMounted(() => {
 
       <!-- ========== TAB: MONITOR ========== -->
       <div v-if="currentTab === 'monitor'" class="space-y-6">
-        <div class="flex items-center justify-between flex-wrap gap-4">
-          <div>
-            <h2 class="text-3xl font-black text-slate-800">运行监控</h2>
-            <p class="text-sm text-slate-500 mt-1">账号轮询、任务产量、失败提示词和运行资源概览</p>
-          </div>
+        <div class="flex items-center justify-end flex-wrap gap-4">
           <button @click="fetchStats" :disabled="statsLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">刷新数据</button>
         </div>
 
@@ -1002,10 +998,7 @@ onMounted(() => {
       <!-- ========== TAB: ACCOUNTS ========== -->
       <div v-if="currentTab === 'accounts'" class="space-y-6">
         <div class="flex items-center justify-between">
-          <div>
-            <h2 class="text-2xl font-black text-slate-800">内部账号池状态</h2>
-            <p class="text-sm text-slate-500 mt-1">每个账号独立 homeDir 和凭证，用于后端轮询分发任务</p>
-          </div>
+          <p class="text-sm text-slate-500">每个账号独立 homeDir 和凭证，用于后端轮询分发任务</p>
           <button @click="setupNewAccount" :disabled="loading" class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-xl font-bold shadow transition">➕ 部署新账号实例</button>
         </div>
         <div v-if="accounts.length === 0" class="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1079,7 +1072,6 @@ onMounted(() => {
 
       <!-- ========== TAB: API KEYS ========== -->
       <div v-if="currentTab === 'apikeys'" class="space-y-6">
-        <h2 class="text-3xl font-black text-slate-800">API 令牌分发与管理</h2>
         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
           <h3 class="font-bold text-slate-700 text-sm uppercase tracking-wider">✚ 签发新令牌</h3>
           <div class="flex flex-wrap gap-3">
@@ -1382,10 +1374,7 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
           <div class="space-y-6">
             <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
               <div class="flex items-center justify-between gap-4 mb-5">
-                <div>
-                  <h2 class="text-2xl font-black text-slate-900">提示词检查工作台</h2>
-                  <p class="text-sm text-slate-500 mt-1">根据历史失败记录做提交前风险筛查</p>
-                </div>
+                <p class="text-sm text-slate-500">根据历史失败记录做提交前风险筛查</p>
                 <span class="hidden md:inline-flex text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">不消耗积分</span>
               </div>
               <div class="space-y-4">
@@ -1494,7 +1483,6 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
       <!-- ========== TAB: TASKS ========== -->
       <div v-if="currentTab === 'tasks'" class="space-y-6">
         <div class="flex items-center justify-between flex-wrap gap-4">
-          <h2 class="text-3xl font-black text-slate-800">任务管理</h2>
           <div class="flex items-center gap-3 flex-wrap">
             <select v-model="taskFilterStatus" @change="fetchTasks(1)" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
               <option value="">全部状态</option>
@@ -1622,7 +1610,6 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
 
       <!-- ========== TAB: SETTINGS ========== -->
       <div v-if="currentTab === 'settings'" class="max-w-xl space-y-6">
-        <h2 class="text-3xl font-black text-slate-800">系统核心安全设置</h2>
         <form @submit.prevent="doUpdatePassword" class="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 space-y-6">
           <input v-model="oldPassword" type="password" required placeholder="当前密码" class="w-full border px-4 py-3 rounded-lg" />
           <input v-model="newPassword" type="password" required placeholder="新密码" class="w-full border px-4 py-3 rounded-lg" />
