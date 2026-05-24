@@ -15,7 +15,6 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { accountService } from '../services/accountService';
 import { runJimengCommand } from '../utils/cliRunner';
-import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import fs from 'fs';
 import { execFile } from 'child_process';

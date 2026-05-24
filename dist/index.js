@@ -77,7 +77,7 @@ if (fs_1.default.existsSync(frontendDist)) {
 pollingDaemon_1.pollingDaemon.start();
 app.listen(PORT, () => {
     console.log(`[🚀] Jimeng OpenAI Dispatcher Server running on http://localhost:${PORT}`);
-    console.log(`[�] Admin Dashboard: http://localhost:${PORT}`);
+    console.log(`[Admin] Dashboard: http://localhost:${PORT}`);
     console.log(`[🤖] OpenAI Base URL: http://localhost:${PORT}/v1`);
 });
 //# sourceMappingURL=index.js.map

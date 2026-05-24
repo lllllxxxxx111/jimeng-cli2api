@@ -13,6 +13,33 @@ const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const adminAuth_1 = require("../middleware/adminAuth");
 const adminStats_1 = require("../services/adminStats");
 const router = (0, express_1.Router)();
+const prisma = new client_1.PrismaClient();
+const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
+const PROMPT_RISK_LIMIT = 8;
+function normalizePromptForRisk(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function promptSimilarity(a, b) {
+    const left = normalizePromptForRisk(a);
+    const right = normalizePromptForRisk(b);
+    if (!left || !right)
+        return 0;
+    if (left === right)
+        return 1;
+    if (left.includes(right) || right.includes(left)) {
+        return Math.min(left.length, right.length) / Math.max(left.length, right.length);
+    }
+    const leftTokens = new Set(left.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+    const rightTokens = new Set(right.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+    if (!leftTokens.size || !rightTokens.size)
+        return 0;
+    let overlap = 0;
+    for (const token of leftTokens) {
+        if (rightTokens.has(token))
+            overlap += 1;
+    }
+    return overlap / Math.max(leftTokens.size, rightTokens.size);
+}
 router.post('/sys/login', async (req, res) => {
     const { password } = req.body;
     if (!password)
@@ -55,8 +82,60 @@ router.get('/stats', async (_req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-const prisma = new client_1.PrismaClient();
-const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
+router.post('/prompt-risk', async (req, res) => {
+    try {
+        const prompt = String(req.body?.prompt || '').trim();
+        const model = String(req.body?.model || '').trim();
+        const type = String(req.body?.type || '').trim();
+        if (!prompt)
+            return res.status(400).json({ error: '提示词不能为空' });
+        const rows = await prisma.task.findMany({
+            where: {
+                status: 'FAILED',
+                prompt: { not: '' },
+                ...(model ? { model } : {}),
+                ...(type ? { type } : {}),
+            },
+            orderBy: { updatedAt: 'desc' },
+            take: 300,
+            select: {
+                id: true,
+                prompt: true,
+                model: true,
+                type: true,
+                errorMsg: true,
+                pollErrorMsg: true,
+                updatedAt: true,
+            },
+        });
+        const matches = rows
+            .map((row) => ({
+            ...row,
+            similarity: promptSimilarity(prompt, row.prompt),
+            reason: row.errorMsg || row.pollErrorMsg || '',
+        }))
+            .filter((row) => row.similarity >= 0.35)
+            .sort((a, b) => b.similarity - a.similarity || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+            .slice(0, PROMPT_RISK_LIMIT);
+        const highest = matches[0]?.similarity || 0;
+        const level = highest >= 0.9 || matches.length >= 3 ? 'high' : highest >= 0.55 ? 'medium' : matches.length > 0 ? 'low' : 'clear';
+        const suggestion = level === 'clear'
+            ? '历史失败记录中未发现相似提示词。'
+            : '发现相似失败记录，建议先改写敏感表达、降低违规风险，再进入排队生成。';
+        res.json({
+            prompt,
+            model: model || null,
+            type: type || null,
+            level,
+            highestSimilarity: highest,
+            matches,
+            suggestion,
+        });
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 function saveOAuthContext(accountHomeDir, ctx) {
     fs_1.default.writeFileSync(path_1.default.join(accountHomeDir, OAUTH_CONTEXT_FILE), JSON.stringify(ctx, null, 2), 'utf8');
 }

@@ -47,6 +47,12 @@ const taskDetail = ref<any>(null);
 const failReason = ref('');
 const failingId = ref<string | null>(null);
 const retryingId = ref<string | null>(null);
+const riskPrompt = ref('');
+const riskModel = ref('');
+const riskType = ref('');
+const riskLoading = ref(false);
+const riskResult = ref<any>(null);
+const riskError = ref('');
 
 const currentTab = ref('accounts');
 
@@ -496,6 +502,59 @@ const inspectFailureReason = (item: any) => {
   fetchTasks(1);
 };
 
+const openRiskWithPrompt = (prompt: string, model = '', type = '') => {
+  currentTab.value = 'risk';
+  riskPrompt.value = prompt || '';
+  riskModel.value = model || '';
+  riskType.value = type || '';
+  if (riskPrompt.value) checkPromptRisk();
+};
+
+const checkPromptRisk = async () => {
+  riskError.value = '';
+  riskResult.value = null;
+  if (!riskPrompt.value.trim()) {
+    riskError.value = '请输入要预检的提示词';
+    return;
+  }
+
+  riskLoading.value = true;
+  try {
+    const res = await authFetch('/admin/prompt-risk', {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: riskPrompt.value,
+        model: riskModel.value || undefined,
+        type: riskType.value || undefined,
+      }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      riskResult.value = data;
+    } else {
+      riskError.value = data.error || '预检失败';
+    }
+  } catch (e: any) {
+    riskError.value = e.message || '预检失败';
+  } finally {
+    riskLoading.value = false;
+  }
+};
+
+const riskLevelLabel = (level: string) => ({
+  clear: '未命中历史风险',
+  low: '低风险',
+  medium: '中风险',
+  high: '高风险',
+}[level] || level);
+
+const riskLevelClass = (level: string) => ({
+  clear: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+  low: 'bg-amber-50 text-amber-700 border-amber-100',
+  medium: 'bg-orange-50 text-orange-700 border-orange-100',
+  high: 'bg-red-50 text-red-700 border-red-100',
+}[level] || 'bg-slate-50 text-slate-700 border-slate-100');
+
 const inspectAccountTasks = (accountId: string) => {
   currentTab.value = 'tasks';
   taskFilterAccountId.value = accountId;
@@ -603,6 +662,7 @@ onMounted(() => {
         <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">内部账号池</button>
         <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 令牌分发</button>
         <button @click="currentTab = 'monitor'; fetchStats()" :class="currentTab === 'monitor' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">运行监控</button>
+        <button @click="currentTab = 'risk'" :class="currentTab === 'risk' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">失败预检</button>
         <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">任务管理</button>
         <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 集成文档</button>
         <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold mt-4">管理员安全</button>
@@ -805,7 +865,10 @@ onMounted(() => {
                     <p class="text-xs text-slate-400 mt-1">{{ item.type }} · {{ item.model || '-' }} · 最近 {{ item.lastFailedAt ? new Date(item.lastFailedAt).toLocaleString() : '-' }}</p>
                     <p v-if="item.sampleError" class="text-xs text-red-500 mt-2 break-words">{{ shortText(item.sampleError, 110) }}</p>
                   </div>
-                  <button @click="inspectFailurePrompt(item)" class="text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg shrink-0">{{ item.count }} 次</button>
+                    <div class="flex flex-col gap-2 shrink-0">
+                      <button @click="inspectFailurePrompt(item)" class="text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg">{{ item.count }} 次</button>
+                      <button @click="openRiskWithPrompt(item.prompt, item.model, item.type)" class="text-xs font-bold text-amber-600 bg-amber-50 hover:bg-amber-100 px-3 py-1.5 rounded-lg">预检</button>
+                    </div>
                 </div>
               </div>
             </div>
@@ -871,6 +934,7 @@ onMounted(() => {
                       <div class="flex gap-2">
                         <button @click="openTaskDetail(task)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">详情</button>
                         <button @click="inspectFailedTask(task)" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg">定位</button>
+                        <button @click="openRiskWithPrompt(task.prompt, task.model, task.type)" class="text-xs font-semibold text-amber-600 bg-amber-50 hover:bg-amber-100 px-3 py-1.5 rounded-lg">预检</button>
                       </div>
                     </td>
                   </tr>
@@ -1064,6 +1128,11 @@ onMounted(() => {
             <div><p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">请求 Content-Type</p><code class="bg-slate-900 text-yellow-400 px-4 py-2 rounded-lg block font-mono text-xs">multipart/form-data</code><p class="text-xs text-slate-400 mt-1">所有生成接口均使用 form-data，支持文件上传</p></div>
             <div><p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">任务状态轮询</p><code class="bg-slate-900 text-green-400 px-4 py-2 rounded-lg block font-mono text-xs">GET /v1/tasks/:id</code><p class="text-xs text-slate-400 mt-1">轮询直到 status 变为 success 或 failed</p></div>
           </div>
+          <div class="mt-4 bg-slate-50 border border-slate-100 rounded-xl p-4">
+            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">能力发现</p>
+            <code class="bg-slate-900 text-green-400 px-4 py-2 rounded-lg block font-mono text-xs">GET /v1/models</code>
+            <p class="text-xs text-slate-400 mt-2">返回图片、视频、高清放大模型及其 capabilities，可给客户端动态渲染能力列表。</p>
+          </div>
         </div>
         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
           <h3 class="font-extrabold text-slate-800 text-lg flex items-center gap-2">⚡ 异步任务响应机制 <span class="text-xs font-semibold bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">必读</span></h3>
@@ -1158,9 +1227,20 @@ done</pre>
   -H "Authorization: Bearer sk-jm-xxx" \
   -F "model=5.0" -F "prompt=一只超写实的机械猫咪" -F "ratio=16:9" -F "resolution_type=4k"
 # 图生图: 追加 -F "images=@/path/to/ref.jpg" (最多10张，限4.0及以上模型)</pre>
+          <div class="mt-5 bg-slate-50 border border-slate-100 rounded-xl p-4">
+            <h4 class="font-black text-slate-700 mb-2">POST /v1/images/upscale — 高清放大</h4>
+            <p class="text-xs text-slate-500 mb-3">对应 CLI 的 image_upscale，支持 resolution_type=2k/4k/8k，可选 session。</p>
+            <pre class="bg-slate-900 text-indigo-300 p-4 rounded-xl font-mono text-xs overflow-x-auto">curl -X POST http://&lt;server&gt;:3000/v1/images/upscale \
+  -H "Authorization: Bearer sk-jm-xxx" \
+  -F "image=@input.jpg" -F "resolution_type=4k"</pre>
+          </div>
         </div>
         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
           <h3 class="font-extrabold text-slate-800 text-lg mb-4">🎬 POST /v1/videos/generations — 各模型参数约束</h3>
+          <div class="bg-blue-50 border border-blue-100 rounded-xl p-4 text-xs text-blue-800 mb-4 leading-6">
+            <p><strong>mode</strong> 支持 auto、text2video、image2video、frames2video、multiframe2video、multimodal2video。</p>
+            <p><strong>session</strong> 会透传给 CLI 的 --session。多图 3 张及以上可传 transition_prompt / transition_duration，数量必须等于图片数 - 1。</p>
+          </div>
           <div class="overflow-x-auto">
             <table class="w-full text-xs border-collapse">
               <thead><tr class="bg-blue-50">
@@ -1198,7 +1278,97 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
 curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
   -H "Authorization: Bearer sk-jm-xxx" \
   -F "model=seedance2.0_vip" -F "prompt=人物嘴型对口型说话" \
-  -F "image=@face1.jpg" -F "image=@face2.jpg" -F "audio=@voice.mp3" -F "duration=8"</pre>
+  -F "image=@face1.jpg" -F "image=@face2.jpg" -F "audio=@voice.mp3" -F "duration=8"
+
+# 多图转场 (3 张及以上)
+curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
+  -H "Authorization: Bearer sk-jm-xxx" \
+  -F "mode=multiframe2video" -F "image=@a.jpg" -F "image=@b.jpg" -F "image=@c.jpg" \
+  -F "transition_prompt=镜头推进" -F "transition_prompt=切到夜景" \
+  -F "transition_duration=3" -F "transition_duration=3"</pre>
+        </div>
+      </div>
+
+      <!-- ========== TAB: PROMPT RISK ========== -->
+      <div v-if="currentTab === 'risk'" class="space-y-6">
+        <div>
+          <h2 class="text-3xl font-black text-slate-800">失败提示词预检</h2>
+          <p class="text-sm text-slate-500 mt-1">基于历史失败任务做相似度检查，先拦截高风险提示词，减少排队后失败的时间损耗</p>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+          <div class="grid grid-cols-1 xl:grid-cols-[1fr_220px_220px] gap-4">
+            <div>
+              <label class="block text-sm font-bold text-slate-700 mb-2">待检查提示词</label>
+              <textarea v-model="riskPrompt" rows="7" placeholder="粘贴即将提交的提示词" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y"></textarea>
+            </div>
+            <div>
+              <label class="block text-sm font-bold text-slate-700 mb-2">模型筛选</label>
+              <input v-model="riskModel" placeholder="可选，如 5.0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+              <p class="text-xs text-slate-400 mt-2">留空时跨模型匹配历史失败记录</p>
+            </div>
+            <div>
+              <label class="block text-sm font-bold text-slate-700 mb-2">任务类型</label>
+              <select v-model="riskType" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                <option value="">全部类型</option>
+                <option value="text2image">text2image</option>
+                <option value="image2image">image2image</option>
+                <option value="image_upscale">image_upscale</option>
+                <option value="text2video">text2video</option>
+                <option value="image2video">image2video</option>
+                <option value="frames2video">frames2video</option>
+                <option value="multiframe2video">multiframe2video</option>
+                <option value="multimodal2video">multimodal2video</option>
+              </select>
+              <button @click="checkPromptRisk" :disabled="riskLoading" class="mt-4 w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-3 rounded-xl font-bold text-sm">{{ riskLoading ? '检查中...' : '开始预检' }}</button>
+            </div>
+          </div>
+          <div v-if="riskError" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ riskError }}</div>
+        </div>
+
+        <div v-if="riskResult" class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+            <p class="text-xs font-bold text-slate-400 uppercase">风险结论</p>
+            <div class="inline-flex px-4 py-2 rounded-xl border text-sm font-black" :class="riskLevelClass(riskResult.level)">{{ riskLevelLabel(riskResult.level) }}</div>
+            <div>
+              <p class="text-3xl font-black text-slate-800">{{ formatRate(riskResult.highestSimilarity || 0) }}</p>
+              <p class="text-xs text-slate-400 mt-1">最高相似度</p>
+            </div>
+            <p class="text-sm text-slate-600 leading-6">{{ riskResult.suggestion }}</p>
+          </div>
+
+          <div class="xl:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-black text-slate-800">相似失败记录</h3>
+              <span class="text-xs text-slate-400">{{ riskResult.matches?.length || 0 }} 条</span>
+            </div>
+            <div v-if="!riskResult.matches?.length" class="px-6 py-12 text-center text-sm text-slate-400">没有命中相似失败记录</div>
+            <div v-else class="divide-y divide-slate-100">
+              <div v-for="item in riskResult.matches" :key="item.id" class="p-5 hover:bg-slate-50">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0">
+                    <p class="text-sm font-semibold text-slate-800 break-words">{{ shortText(item.prompt, 150) }}</p>
+                    <p class="text-xs text-slate-400 mt-1">{{ item.type }} · {{ item.model || '-' }} · {{ new Date(item.updatedAt).toLocaleString() }}</p>
+                    <p v-if="item.reason" class="text-xs text-red-500 mt-2 break-words">{{ shortText(item.reason, 140) }}</p>
+                  </div>
+                  <button @click="taskFilterStatus = 'FAILED'; taskFilterPrompt = item.prompt; taskFilterError = ''; currentTab = 'tasks'; fetchTasks(1)" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg shrink-0">{{ formatRate(item.similarity) }}</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="stats?.failures?.byPrompt?.length" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="font-black text-slate-800">高频失败提示词</h3>
+            <button @click="fetchStats" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">更新统计</button>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" @click="openRiskWithPrompt(item.prompt, item.model, item.type)" class="text-xs text-left bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 rounded-lg px-3 py-2 max-w-sm">
+              <span class="font-bold">{{ item.count }} 次</span>
+              <span class="ml-2">{{ item.promptPreview }}</span>
+            </button>
+          </div>
         </div>
       </div>
 

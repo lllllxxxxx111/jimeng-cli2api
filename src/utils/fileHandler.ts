@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 const tempDir = path.resolve(__dirname, '../../data/temp_inputs');
 
@@ -14,7 +14,7 @@ if (!fs.existsSync(tempDir)) {
  * Handle base64, URL, or local file buffer and save it to a temporary file
  */
 export const saveTempFile = async (input: string | Buffer, ext = '.png'): Promise<string> => {
-  const fileName = `${uuidv4()}${ext}`;
+  const fileName = `${randomUUID()}${ext}`;
   const filePath = path.join(tempDir, fileName);
 
   if (Buffer.isBuffer(input)) {

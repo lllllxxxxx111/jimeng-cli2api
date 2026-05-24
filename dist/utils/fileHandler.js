@@ -7,7 +7,7 @@ exports.cleanupTempFile = exports.saveTempFile = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const axios_1 = __importDefault(require("axios"));
-const uuid_1 = require("uuid");
+const crypto_1 = require("crypto");
 const tempDir = path_1.default.resolve(__dirname, '../../data/temp_inputs');
 // Ensure temp dir exists
 if (!fs_1.default.existsSync(tempDir)) {
@@ -17,7 +17,7 @@ if (!fs_1.default.existsSync(tempDir)) {
  * Handle base64, URL, or local file buffer and save it to a temporary file
  */
 const saveTempFile = async (input, ext = '.png') => {
-    const fileName = `${(0, uuid_1.v4)()}${ext}`;
+    const fileName = `${(0, crypto_1.randomUUID)()}${ext}`;
     const filePath = path_1.default.join(tempDir, fileName);
     if (Buffer.isBuffer(input)) {
         fs_1.default.writeFileSync(filePath, input);

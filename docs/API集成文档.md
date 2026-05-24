@@ -13,6 +13,18 @@
 | 请求格式 | `multipart/form-data`（所有生成接口） |
 | 任务模式 | **异步**：POST 立即返回任务 ID，需轮询 GET /v1/tasks/:id |
 
+### 已对齐的 CLI 功能
+
+| CLI 功能 | API 暴露方式 |
+|----------|--------------|
+| `text2image` / `image2image` | `POST /v1/images/generations` |
+| `image_upscale` | `POST /v1/images/upscale` |
+| `text2video` / `image2video` / `frames2video` | `POST /v1/videos/generations`，用 `mode` 或附件自动路由 |
+| `multiframe2video` / `multimodal2video` | `POST /v1/videos/generations`，支持多图、视频、音频和转场参数 |
+| `query_result` | 后台轮询守护进程自动执行，客户端用 `GET /v1/tasks/:id` 查询 |
+| `user_credit` / `list_task` | 管理后台账号检测、运行监控和任务管理 |
+| `session` | 生成接口可传 `session`，用于 CLI 的 `--session` |
+
 ---
 
 ## 异步任务响应机制（必读）
@@ -123,6 +135,28 @@ PENDING → PROCESSING → SUCCESS
 
 ---
 
+## 接口0：模型列表
+
+```
+GET /v1/models
+Authorization: Bearer sk-jm-xxx
+```
+
+返回当前服务暴露的模型和能力列表，客户端可用于动态选择图片、视频和高清放大能力。
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "5.0", "object": "model", "owned_by": "dreamina", "capabilities": ["image"] },
+    { "id": "seedance2.0", "object": "model", "owned_by": "dreamina", "capabilities": ["text2video", "image2video", "frames2video", "multimodal2video"] },
+    { "id": "image_upscale", "object": "model", "owned_by": "dreamina", "capabilities": ["image_upscale"] }
+  ]
+}
+```
+
+---
+
 ## 接口1：图片生成
 
 ```
@@ -138,6 +172,7 @@ POST /v1/images/generations
 | `ratio` | | 画幅比例，如 `16:9`、`1:1`、`9:16` |
 | `resolution_type` | | `4k` / `2k`（3.x 系最高 2k） |
 | `images` | | [File Array] 参考图，最多 10 张，仅限 4.0+ 模型 |
+| `session` | | CLI 会话 ID，非负整数，透传为 `--session` |
 
 ### 图片模型能力矩阵
 
@@ -172,13 +207,40 @@ curl -X POST http://SERVER:3000/v1/images/generations \
 
 ---
 
-## 接口2：视频创作
+## 接口2：图片高清放大
+
+```
+POST /v1/images/upscale
+```
+
+### Form-Data 参数
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `image` | ✅ | 需要放大的图片文件 |
+| `resolution_type` | | `2k` / `4k` / `8k`，默认 `2k` |
+| `session` | | CLI 会话 ID，非负整数，透传为 `--session` |
+
+### cURL 示例
+
+```bash
+curl -X POST http://SERVER:3000/v1/images/upscale \
+  -H "Authorization: Bearer sk-jm-xxx" \
+  -F "image=@/path/to/input.jpg" \
+  -F "resolution_type=4k"
+```
+
+---
+
+## 接口3：视频创作
 
 ```
 POST /v1/videos/generations
 ```
 
-### 路由原则（API 端自动处理，客户端无需关心）
+### 路由原则
+
+默认 `mode=auto` 时，API 会根据附件自动选择 CLI 命令；如果你已经明确知道要走哪个 CLI 功能，也可以手动传 `mode`。
 
 **3.x 系模型（3.0 / 3.0fast / 3.0pro / 3.5pro）：**
 - 无附件 → 纯文生视频
@@ -210,11 +272,16 @@ POST /v1/videos/generations
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `prompt` | ✅ | 核心描述提示词 |
+| `prompt` | 条件必填 | 核心描述提示词。文生视频必填；多数图生视频建议填写；3 张以上多图可用 `transition_prompt` 替代 |
 | `model` | | 模型名称，默认 `seedance2.0fast` |
+| `mode` | | `auto` / `text2video` / `image2video` / `frames2video` / `multiframe2video` / `multimodal2video` |
 | `duration` | | 时长（整数秒），范围见上表 |
 | `video_resolution` | | seedance2.0 系：`720p`（暂仅此项，后续 1080p 支持时直接传入）<br>3.5pro / 3.0：`720p` 或 `1080p`；3.0pro：`1080p`；不传 = 模型默认 |
 | `ratio` | | 画幅比 `16:9`、`9:16`、`1:1`、`3:4`、`4:3`、`21:9` 等。<br>**仅 text2video 和 multimodal2video 生效**；image2video / frames2video / multiframe2video 命令不传此参数，CLI 自动跟首帧比例 |
+| `transition_prompt` | | 多图视频 3 张及以上时使用，可重复传多个或传 JSON 数组；数量必须等于图片数 - 1 |
+| `transition_duration` | | 多图视频 3 张及以上时使用，可重复传多个或传 JSON 数组；每段 0.5–8 秒，数量必须等于图片数 - 1 |
+| `reference_order` | | 多模态排序 JSON，用于精确保持图片、视频、音频参考顺序 |
+| `session` | | CLI 会话 ID，非负整数，透传为 `--session` |
 
 ### 3.x 系 — 关键帧文件槽
 
@@ -265,7 +332,41 @@ curl -X POST http://SERVER:3000/v1/videos/generations \
   -F "prompt=她跟随音乐的节拍起舞" \
   -F "image=@character.jpg" \
   -F "audio=@bgm.mp3"
+
+# ⑤ 多图转场视频（3 张及以上）
+curl -X POST http://SERVER:3000/v1/videos/generations \
+  -H "Authorization: Bearer sk-jm-xxx" \
+  -F "mode=multiframe2video" \
+  -F "image=@scene1.jpg" \
+  -F "image=@scene2.jpg" \
+  -F "image=@scene3.jpg" \
+  -F "transition_prompt=从室内推镜到窗边" \
+  -F "transition_prompt=从窗边切到城市夜景" \
+  -F "transition_duration=3" \
+  -F "transition_duration=3"
 ```
+
+---
+
+## 管理端辅助接口：失败提示词预检
+
+该接口只给管理后台使用，不走 `/v1`，需要管理员 token。它不会调用即梦 CLI，也不会消耗积分，只根据历史失败任务做相似度检查。
+
+```
+POST /admin/prompt-risk
+Authorization: Bearer <admin_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "prompt": "待检查提示词",
+  "model": "5.0",
+  "type": "text2image"
+}
+```
+
+返回 `level`、最高相似度和相似失败记录。`level=high` 时建议先改写提示词再提交生成，避免排队后失败。
 
 ---
 
