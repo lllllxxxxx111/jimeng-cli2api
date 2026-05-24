@@ -92,6 +92,8 @@ const sdkPollResponse = ref<any>(null);
 const sdkLoading = ref(false);
 const sdkPolling = ref(false);
 const sdkError = ref('');
+const sdkShowRawResponse = ref(false);
+const sdkShowRawPollResponse = ref(false);
 
 const currentTab = ref('monitor');
 
@@ -539,6 +541,67 @@ const buildSdkPayload = () => {
   return Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined && value !== ''));
 };
 
+const compactSdkValue = (value: any) => {
+  const text = String(value ?? '-');
+  return text.length > 72 ? `${text.slice(0, 69)}...` : text;
+};
+
+const sdkResponseSummary = (value: any) => {
+  if (!value) return null;
+  const errorMessage = value.error?.message || (typeof value.error === 'string' ? value.error : '');
+  if (errorMessage) {
+    return {
+      title: '请求失败',
+      subtitle: errorMessage,
+      stats: [{ label: '错误', value: compactSdkValue(errorMessage) }],
+      chips: [] as string[],
+    };
+  }
+
+  if (value.object === 'list' && Array.isArray(value.data)) {
+    const capabilities = Array.from(new Set(value.data.flatMap((item: any) => Array.isArray(item.capabilities) ? item.capabilities : []))).sort();
+    const globalCapabilities = Object.entries(value.global_capabilities || {})
+      .filter(([, enabled]) => Boolean(enabled))
+      .map(([name]) => name);
+    return {
+      title: '模型列表返回成功',
+      subtitle: '这是完整能力矩阵的摘要，完整 JSON 可以展开或复制。',
+      stats: [
+        { label: '模型数量', value: value.data.length },
+        { label: '能力数量', value: capabilities.length },
+        { label: '全局能力', value: globalCapabilities.length || '-' },
+      ],
+      chips: [...globalCapabilities, ...capabilities, ...value.data.map((item: any) => item.id)].filter(Boolean).slice(0, 18),
+    };
+  }
+
+  const taskId = extractTaskIdFromSdkResponse(value);
+  if (taskId) {
+    return {
+      title: '任务已提交',
+      subtitle: pollPathForSdkResponse(value) ? `可继续轮询 ${pollPathForSdkResponse(value)}` : '后端已返回任务标识。',
+      stats: [
+        { label: '任务 ID', value: compactSdkValue(taskId) },
+        { label: '状态', value: value.status || value.state || '-' },
+        { label: 'submit_id', value: compactSdkValue(value.submit_id || value.metadata?.submit_id || '-') },
+      ],
+      chips: [value.object, value.task_type, value.metadata?.dreamina_model, value.metadata?.task_type].filter(Boolean).slice(0, 8),
+    };
+  }
+
+  const keys = typeof value === 'object' ? Object.keys(value) : [];
+  return {
+    title: '接口响应',
+    subtitle: '返回内容已收起，展开 JSON 可查看完整字段。',
+    stats: [
+      { label: '类型', value: Array.isArray(value) ? 'array' : typeof value },
+      { label: '字段数', value: keys.length || '-' },
+      { label: 'object', value: value.object || '-' },
+    ],
+    chips: keys.slice(0, 12),
+  };
+};
+
 const appendSdkFormValue = (form: FormData, key: string, value: any) => {
   if (value === undefined || value === null || value === '') return;
   if (Array.isArray(value)) {
@@ -675,6 +738,8 @@ const runSdkTest = async () => {
   sdkError.value = '';
   sdkResponse.value = null;
   sdkPollResponse.value = null;
+  sdkShowRawResponse.value = false;
+  sdkShowRawPollResponse.value = false;
   try {
     const endpoint = sdkEndpoint();
     let data: any;
@@ -707,6 +772,7 @@ const pollSdkResult = async () => {
   }
   sdkPolling.value = true;
   sdkError.value = '';
+  sdkShowRawPollResponse.value = false;
   try {
     sdkPollResponse.value = await callOpenAiApi(path, { method: 'GET' });
   } catch (error: any) {
@@ -721,6 +787,8 @@ const clearSdkResult = () => {
   sdkResponse.value = null;
   sdkPollResponse.value = null;
   sdkError.value = '';
+  sdkShowRawResponse.value = false;
+  sdkShowRawPollResponse.value = false;
 };
 
 const openTaskById = async (id: string) => {
@@ -2279,15 +2347,34 @@ onMounted(() => {
             <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
               <div>
                 <h3 class="font-black text-slate-900">提交响应</h3>
-                <p class="text-xs text-slate-400 mt-1">返回 resp_、video_ 或 task id 后可继续轮询</p>
+                <p class="text-xs text-slate-400 mt-1">默认显示摘要，完整 JSON 可按需展开</p>
               </div>
               <div class="flex gap-2">
                 <button v-if="extractTaskIdFromSdkResponse(sdkResponse)" @click="openSdkTaskInAdmin" class="text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">去任务页</button>
+                <button @click="sdkShowRawResponse = !sdkShowRawResponse" :disabled="!sdkResponse" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-40 px-3 py-1.5 rounded-lg">{{ sdkShowRawResponse ? '收起 JSON' : '展开 JSON' }}</button>
                 <button @click="clearSdkResult" :disabled="!sdkResponse && !sdkPollResponse && !sdkError" class="text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">清空</button>
                 <button @click="nativeCopy(jsonText(sdkResponse))" :disabled="!sdkResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>
               </div>
             </div>
-            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[280px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkResponse) || '还没有响应。先点击“发送测试请求”。' }}</pre>
+            <div v-if="sdkResponse" class="p-5 space-y-4">
+              <div v-if="sdkResponseSummary(sdkResponse)" class="space-y-4">
+                <div>
+                  <h4 class="text-lg font-black text-slate-900">{{ sdkResponseSummary(sdkResponse)?.title }}</h4>
+                  <p class="text-sm text-slate-500 mt-1">{{ sdkResponseSummary(sdkResponse)?.subtitle }}</p>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div v-for="item in sdkResponseSummary(sdkResponse)?.stats" :key="item.label" class="bg-slate-50 border border-slate-100 rounded-xl p-4 min-w-0">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">{{ item.label }}</p>
+                    <p class="text-sm font-black text-slate-900 mt-2 break-words">{{ item.value }}</p>
+                  </div>
+                </div>
+                <div v-if="sdkResponseSummary(sdkResponse)?.chips.length" class="flex flex-wrap gap-2">
+                  <span v-for="chip in sdkResponseSummary(sdkResponse)?.chips" :key="chip" class="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-full">{{ chip }}</span>
+                </div>
+              </div>
+              <pre v-if="sdkShowRawResponse" class="bg-slate-950 text-slate-200 rounded-xl p-5 text-xs font-mono max-h-[420px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkResponse) }}</pre>
+            </div>
+            <div v-else class="p-5 text-sm text-slate-500 min-h-[180px] flex items-center">还没有响应。先点击“发送测试请求”。</div>
           </div>
 
           <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
@@ -2296,9 +2383,30 @@ onMounted(() => {
                 <h3 class="font-black text-slate-900">轮询响应</h3>
                 <p class="text-xs text-slate-400 mt-1">{{ pollPathForSdkResponse(sdkResponse) || '提交成功后显示轮询地址' }}</p>
               </div>
-              <button @click="nativeCopy(jsonText(sdkPollResponse))" :disabled="!sdkPollResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>
+              <div class="flex gap-2">
+                <button @click="sdkShowRawPollResponse = !sdkShowRawPollResponse" :disabled="!sdkPollResponse" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-40 px-3 py-1.5 rounded-lg">{{ sdkShowRawPollResponse ? '收起 JSON' : '展开 JSON' }}</button>
+                <button @click="nativeCopy(jsonText(sdkPollResponse))" :disabled="!sdkPollResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>
+              </div>
             </div>
-            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[280px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkPollResponse) || '提交后点击“轮询结果”，查看任务是否 success / failed。' }}</pre>
+            <div v-if="sdkPollResponse" class="p-5 space-y-4">
+              <div v-if="sdkResponseSummary(sdkPollResponse)" class="space-y-4">
+                <div>
+                  <h4 class="text-lg font-black text-slate-900">{{ sdkResponseSummary(sdkPollResponse)?.title }}</h4>
+                  <p class="text-sm text-slate-500 mt-1">{{ sdkResponseSummary(sdkPollResponse)?.subtitle }}</p>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div v-for="item in sdkResponseSummary(sdkPollResponse)?.stats" :key="item.label" class="bg-slate-50 border border-slate-100 rounded-xl p-4 min-w-0">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">{{ item.label }}</p>
+                    <p class="text-sm font-black text-slate-900 mt-2 break-words">{{ item.value }}</p>
+                  </div>
+                </div>
+                <div v-if="sdkResponseSummary(sdkPollResponse)?.chips.length" class="flex flex-wrap gap-2">
+                  <span v-for="chip in sdkResponseSummary(sdkPollResponse)?.chips" :key="chip" class="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-full">{{ chip }}</span>
+                </div>
+              </div>
+              <pre v-if="sdkShowRawPollResponse" class="bg-slate-950 text-slate-200 rounded-xl p-5 text-xs font-mono max-h-[420px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkPollResponse) }}</pre>
+            </div>
+            <div v-else class="p-5 text-sm text-slate-500 min-h-[180px] flex items-center">提交后点击“轮询结果”，查看任务是否 success / failed。</div>
           </div>
         </div>
       </div>
