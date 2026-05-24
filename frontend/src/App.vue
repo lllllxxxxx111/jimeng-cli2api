@@ -175,6 +175,31 @@ const shortText = (value: string, max = 90) => {
   return text.length <= max ? text : `${text.slice(0, max - 1)}...`;
 };
 
+const pageTitle = () => ({
+  accounts: '内部账号池',
+  apikeys: 'API 令牌分发',
+  monitor: '运行监控',
+  risk: '失败预检',
+  tasks: '任务管理',
+  docs: 'API 集成文档',
+  settings: '管理员安全',
+}[currentTab.value] || '控制台');
+
+const pageSubtitle = () => ({
+  accounts: '隔离运行账号、检测积分余额、处理授权状态',
+  apikeys: '签发客户端访问令牌，并绑定到指定账号或全局池',
+  monitor: '查看账号轮询、创意产量、失败率和运行资源',
+  risk: '提交前检查历史失败相似度，减少排队后的无效失败',
+  tasks: '按状态、账号、提示词和错误原因追踪任务',
+  docs: '查看当前服务暴露的 CLI 功能、参数和调用示例',
+  settings: '修改后台访问密码和安全凭证',
+}[currentTab.value] || '');
+
+const availableAccountCount = () => stats.value?.accounts?.idle ?? accounts.value.filter((item: any) => item.status === 'IDLE').length;
+const processingTaskCount = () => stats.value?.tasks?.processing ?? tasks.value.filter((item: any) => item.status === 'PROCESSING').length;
+const todaySuccessCount = () => stats.value?.tasks?.today?.success ?? 0;
+const riskScorePercent = (value: number) => `${Math.round((Number(value) || 0) * 100)}%`;
+
 const getAccountMetrics = (accountId: string) => {
   const row = stats.value?.accounts?.accounts?.find((item: any) => item.id === accountId);
   return row || { totalCreatives: 0, todayCreatives: 0, processingTasks: 0, todaySuccess: 0, failedTasks: 0, todayFailed: 0 };
@@ -548,13 +573,6 @@ const riskLevelLabel = (level: string) => ({
   high: '高风险',
 }[level] || level);
 
-const riskLevelClass = (level: string) => ({
-  clear: 'bg-emerald-50 text-emerald-700 border-emerald-100',
-  low: 'bg-amber-50 text-amber-700 border-amber-100',
-  medium: 'bg-orange-50 text-orange-700 border-orange-100',
-  high: 'bg-red-50 text-red-700 border-red-100',
-}[level] || 'bg-slate-50 text-slate-700 border-slate-100');
-
 const inspectAccountTasks = (accountId: string) => {
   currentTab.value = 'tasks';
   taskFilterAccountId.value = accountId;
@@ -655,22 +673,58 @@ onMounted(() => {
     </div>
   </div>
 
-  <div v-else class="flex min-h-screen bg-[#f8fafc] text-slate-800">
-    <aside class="w-64 bg-slate-900 text-white flex flex-col shadow-2xl z-10 p-6 shrink-0">
-      <h1 class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400 mb-8">即梦Cli_api</h1>
-      <nav class="flex-1 space-y-2">
-        <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">内部账号池</button>
-        <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 令牌分发</button>
-        <button @click="currentTab = 'monitor'; fetchStats()" :class="currentTab === 'monitor' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">运行监控</button>
-        <button @click="currentTab = 'risk'" :class="currentTab === 'risk' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">失败预检</button>
-        <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">任务管理</button>
-        <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 集成文档</button>
-        <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold mt-4">管理员安全</button>
+  <div v-else class="flex min-h-screen bg-slate-100 text-slate-800">
+    <aside class="w-72 bg-slate-950 text-white flex flex-col shadow-2xl z-10 p-5 shrink-0">
+      <div class="mb-6 rounded-2xl bg-white/5 border border-white/10 p-4">
+        <p class="text-xs font-bold text-indigo-300 tracking-wider uppercase">Jimeng Hub</p>
+        <h1 class="text-2xl font-black mt-1">即梦Cli_api</h1>
+        <p class="text-xs text-slate-400 mt-2 leading-5">服务器端账号池、任务调度和生成接口管理</p>
+      </div>
+      <nav class="flex-1 space-y-1">
+        <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>内部账号池</span><span class="text-xs opacity-70">{{ accounts.length }}</span></button>
+        <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>API 令牌分发</span><span class="text-xs opacity-70">{{ apikeys.length }}</span></button>
+        <button @click="currentTab = 'monitor'; fetchStats()" :class="currentTab === 'monitor' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>运行监控</span><span class="text-xs opacity-70">{{ processingTaskCount() }}</span></button>
+        <button @click="currentTab = 'risk'" :class="currentTab === 'risk' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>失败预检</span><span class="text-xs opacity-70">{{ stats?.failures?.byPrompt?.length || 0 }}</span></button>
+        <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>任务管理</span><span class="text-xs opacity-70">{{ taskTotal || stats?.tasks?.total || 0 }}</span></button>
+        <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>API 集成文档</span><span class="text-xs opacity-70">CLI</span></button>
+        <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition mt-4 flex items-center justify-between"><span>管理员安全</span><span class="text-xs opacity-70">Admin</span></button>
       </nav>
-      <button @click="doLogout" class="w-full bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-400 py-3 rounded-xl font-bold mt-4">退出系统</button>
+      <div class="rounded-2xl bg-slate-900 border border-white/10 p-4 mb-4">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>可用账号</span>
+          <span class="font-mono text-emerald-300">{{ availableAccountCount() }}</span>
+        </div>
+        <div class="flex items-center justify-between text-xs text-slate-400 mt-2">
+          <span>今日成功</span>
+          <span class="font-mono text-indigo-300">{{ todaySuccessCount() }}</span>
+        </div>
+      </div>
+      <button @click="doLogout" class="w-full bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-300 py-3 rounded-xl font-bold transition">退出系统</button>
     </aside>
 
-    <main class="flex-1 p-10 overflow-y-auto h-screen">
+    <main class="flex-1 p-8 overflow-y-auto h-screen">
+
+      <div class="mb-8 rounded-3xl bg-white border border-slate-200 shadow-sm px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-5">
+        <div>
+          <p class="text-xs font-bold text-indigo-600 tracking-wider uppercase">Console</p>
+          <h2 class="text-3xl font-black text-slate-900 mt-1">{{ pageTitle() }}</h2>
+          <p class="text-sm text-slate-500 mt-1">{{ pageSubtitle() }}</p>
+        </div>
+        <div class="grid grid-cols-3 gap-3 min-w-full xl:min-w-[520px]">
+          <div class="rounded-2xl bg-emerald-50 border border-emerald-100 px-4 py-3">
+            <p class="text-[11px] font-bold text-emerald-600 uppercase">可用账号</p>
+            <p class="text-2xl font-black text-emerald-700 mt-1">{{ availableAccountCount() }}</p>
+          </div>
+          <div class="rounded-2xl bg-indigo-50 border border-indigo-100 px-4 py-3">
+            <p class="text-[11px] font-bold text-indigo-600 uppercase">处理中</p>
+            <p class="text-2xl font-black text-indigo-700 mt-1">{{ processingTaskCount() }}</p>
+          </div>
+          <div class="rounded-2xl bg-slate-50 border border-slate-200 px-4 py-3">
+            <p class="text-[11px] font-bold text-slate-500 uppercase">今日成功</p>
+            <p class="text-2xl font-black text-slate-800 mt-1">{{ todaySuccessCount() }}</p>
+          </div>
+        </div>
+      </div>
 
       <!-- OAuth Device Flow 授权弹窗 -->
       <div v-if="oauthModal.show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
@@ -948,12 +1002,45 @@ onMounted(() => {
       <!-- ========== TAB: ACCOUNTS ========== -->
       <div v-if="currentTab === 'accounts'" class="space-y-6">
         <div class="flex items-center justify-between">
-          <h2 class="text-3xl font-black text-slate-800">内部账号池状态</h2>
+          <div>
+            <h2 class="text-2xl font-black text-slate-800">内部账号池状态</h2>
+            <p class="text-sm text-slate-500 mt-1">每个账号独立 homeDir 和凭证，用于后端轮询分发任务</p>
+          </div>
           <button @click="setupNewAccount" :disabled="loading" class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-xl font-bold shadow transition">➕ 部署新账号实例</button>
         </div>
-        <div v-if="accounts.length === 0" class="text-center py-20 text-slate-400 bg-white rounded-2xl border border-slate-200">
-          <p class="text-5xl mb-4">🤖</p>
-          <p class="font-medium">暂无账号。点击右上角「部署新账号实例」开始。</p>
+        <div v-if="accounts.length === 0" class="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+          <div class="grid grid-cols-1 xl:grid-cols-[1fr_360px]">
+            <div class="p-10">
+              <p class="text-xs font-bold text-indigo-600 uppercase tracking-wider">Account Pool</p>
+              <h3 class="text-3xl font-black text-slate-900 mt-3">还没有可调度账号</h3>
+              <p class="text-sm text-slate-500 mt-3 leading-6 max-w-xl">先部署一个即梦账号实例并完成授权，API Key 才能拿到可用账号去提交图片、视频和高清放大任务。</p>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-7">
+                <div class="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                  <p class="text-xs font-black text-slate-500">1. 部署实例</p>
+                  <p class="text-xs text-slate-400 mt-2 leading-5">创建独立账号目录</p>
+                </div>
+                <div class="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                  <p class="text-xs font-black text-slate-500">2. 完成授权</p>
+                  <p class="text-xs text-slate-400 mt-2 leading-5">浏览器确认登录态</p>
+                </div>
+                <div class="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                  <p class="text-xs font-black text-slate-500">3. 签发 Key</p>
+                  <p class="text-xs text-slate-400 mt-2 leading-5">绑定账号或全局池</p>
+                </div>
+              </div>
+            </div>
+            <div class="bg-slate-950 text-white p-8 flex flex-col justify-between">
+              <div>
+                <p class="text-xs font-bold text-slate-400 uppercase">建议顺序</p>
+                <div class="mt-5 space-y-4 text-sm">
+                  <div class="flex gap-3"><span class="w-7 h-7 rounded-full bg-indigo-500 text-white flex items-center justify-center text-xs font-black shrink-0">1</span><span class="text-slate-300">部署第一个 VIP 账号实例</span></div>
+                  <div class="flex gap-3"><span class="w-7 h-7 rounded-full bg-indigo-500 text-white flex items-center justify-center text-xs font-black shrink-0">2</span><span class="text-slate-300">检测积分和状态是否可用</span></div>
+                  <div class="flex gap-3"><span class="w-7 h-7 rounded-full bg-indigo-500 text-white flex items-center justify-center text-xs font-black shrink-0">3</span><span class="text-slate-300">进入 API 令牌分发签发客户端 Key</span></div>
+                </div>
+              </div>
+              <button @click="setupNewAccount" :disabled="loading" class="mt-8 bg-white text-slate-950 hover:bg-indigo-50 disabled:opacity-50 rounded-xl px-5 py-3 text-sm font-black transition">开始部署账号</button>
+            </div>
+          </div>
         </div>
         <div v-for="acc in accounts" :key="acc.id" class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
           <div class="p-6 flex flex-col sm:flex-row sm:items-center gap-4">
@@ -1291,83 +1378,115 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
 
       <!-- ========== TAB: PROMPT RISK ========== -->
       <div v-if="currentTab === 'risk'" class="space-y-6">
-        <div>
-          <h2 class="text-3xl font-black text-slate-800">失败提示词预检</h2>
-          <p class="text-sm text-slate-500 mt-1">基于历史失败任务做相似度检查，先拦截高风险提示词，减少排队后失败的时间损耗</p>
-        </div>
-
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
-          <div class="grid grid-cols-1 xl:grid-cols-[1fr_220px_220px] gap-4">
-            <div>
-              <label class="block text-sm font-bold text-slate-700 mb-2">待检查提示词</label>
-              <textarea v-model="riskPrompt" rows="7" placeholder="粘贴即将提交的提示词" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y"></textarea>
-            </div>
-            <div>
-              <label class="block text-sm font-bold text-slate-700 mb-2">模型筛选</label>
-              <input v-model="riskModel" placeholder="可选，如 5.0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
-              <p class="text-xs text-slate-400 mt-2">留空时跨模型匹配历史失败记录</p>
-            </div>
-            <div>
-              <label class="block text-sm font-bold text-slate-700 mb-2">任务类型</label>
-              <select v-model="riskType" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                <option value="">全部类型</option>
-                <option value="text2image">text2image</option>
-                <option value="image2image">image2image</option>
-                <option value="image_upscale">image_upscale</option>
-                <option value="text2video">text2video</option>
-                <option value="image2video">image2video</option>
-                <option value="frames2video">frames2video</option>
-                <option value="multiframe2video">multiframe2video</option>
-                <option value="multimodal2video">multimodal2video</option>
-              </select>
-              <button @click="checkPromptRisk" :disabled="riskLoading" class="mt-4 w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-3 rounded-xl font-bold text-sm">{{ riskLoading ? '检查中...' : '开始预检' }}</button>
-            </div>
-          </div>
-          <div v-if="riskError" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ riskError }}</div>
-        </div>
-
-        <div v-if="riskResult" class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-            <p class="text-xs font-bold text-slate-400 uppercase">风险结论</p>
-            <div class="inline-flex px-4 py-2 rounded-xl border text-sm font-black" :class="riskLevelClass(riskResult.level)">{{ riskLevelLabel(riskResult.level) }}</div>
-            <div>
-              <p class="text-3xl font-black text-slate-800">{{ formatRate(riskResult.highestSimilarity || 0) }}</p>
-              <p class="text-xs text-slate-400 mt-1">最高相似度</p>
-            </div>
-            <p class="text-sm text-slate-600 leading-6">{{ riskResult.suggestion }}</p>
-          </div>
-
-          <div class="xl:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 class="font-black text-slate-800">相似失败记录</h3>
-              <span class="text-xs text-slate-400">{{ riskResult.matches?.length || 0 }} 条</span>
-            </div>
-            <div v-if="!riskResult.matches?.length" class="px-6 py-12 text-center text-sm text-slate-400">没有命中相似失败记录</div>
-            <div v-else class="divide-y divide-slate-100">
-              <div v-for="item in riskResult.matches" :key="item.id" class="p-5 hover:bg-slate-50">
-                <div class="flex items-start justify-between gap-4">
-                  <div class="min-w-0">
-                    <p class="text-sm font-semibold text-slate-800 break-words">{{ shortText(item.prompt, 150) }}</p>
-                    <p class="text-xs text-slate-400 mt-1">{{ item.type }} · {{ item.model || '-' }} · {{ new Date(item.updatedAt).toLocaleString() }}</p>
-                    <p v-if="item.reason" class="text-xs text-red-500 mt-2 break-words">{{ shortText(item.reason, 140) }}</p>
+        <div class="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_420px] gap-6">
+          <div class="space-y-6">
+            <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
+              <div class="flex items-center justify-between gap-4 mb-5">
+                <div>
+                  <h2 class="text-2xl font-black text-slate-900">提示词检查工作台</h2>
+                  <p class="text-sm text-slate-500 mt-1">根据历史失败记录做提交前风险筛查</p>
+                </div>
+                <span class="hidden md:inline-flex text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">不消耗积分</span>
+              </div>
+              <div class="space-y-4">
+                <div>
+                  <label class="block text-sm font-bold text-slate-700 mb-2">待检查提示词</label>
+                  <textarea v-model="riskPrompt" rows="9" placeholder="粘贴即将提交到生图或生视频接口的提示词" class="w-full border border-slate-300 bg-slate-50 focus:bg-white px-4 py-3 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y leading-6"></textarea>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-[220px_220px_1fr] gap-4 items-end">
+                  <div>
+                    <label class="block text-sm font-bold text-slate-700 mb-2">模型筛选</label>
+                    <input v-model="riskModel" placeholder="可选，如 5.0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
                   </div>
-                  <button @click="taskFilterStatus = 'FAILED'; taskFilterPrompt = item.prompt; taskFilterError = ''; currentTab = 'tasks'; fetchTasks(1)" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg shrink-0">{{ formatRate(item.similarity) }}</button>
+                  <div>
+                    <label class="block text-sm font-bold text-slate-700 mb-2">任务类型</label>
+                    <select v-model="riskType" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                      <option value="">全部类型</option>
+                      <option value="text2image">text2image</option>
+                      <option value="image2image">image2image</option>
+                      <option value="image_upscale">image_upscale</option>
+                      <option value="text2video">text2video</option>
+                      <option value="image2video">image2video</option>
+                      <option value="frames2video">frames2video</option>
+                      <option value="multiframe2video">multiframe2video</option>
+                      <option value="multimodal2video">multimodal2video</option>
+                    </select>
+                  </div>
+                  <button @click="checkPromptRisk" :disabled="riskLoading" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-6 py-3 rounded-xl font-black text-sm shadow-sm transition">{{ riskLoading ? '检查中...' : '开始预检' }}</button>
+                </div>
+                <div v-if="riskError" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ riskError }}</div>
+              </div>
+            </div>
+
+            <div v-if="riskResult" class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+              <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h3 class="font-black text-slate-900">相似失败记录</h3>
+                  <p class="text-xs text-slate-400 mt-1">点击相似度可跳转到任务列表定位原始记录</p>
+                </div>
+                <span class="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">{{ riskResult.matches?.length || 0 }} 条</span>
+              </div>
+              <div v-if="!riskResult.matches?.length" class="px-6 py-12 text-center">
+                <p class="text-3xl mb-3">✓</p>
+                <p class="text-sm font-semibold text-slate-600">没有命中相似失败记录</p>
+                <p class="text-xs text-slate-400 mt-1">这不代表一定成功，只表示历史失败库里暂未发现相似项。</p>
+              </div>
+              <div v-else class="divide-y divide-slate-100">
+                <div v-for="item in riskResult.matches" :key="item.id" class="p-5 hover:bg-slate-50 transition">
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="min-w-0">
+                      <p class="text-sm font-semibold text-slate-800 break-words leading-6">{{ shortText(item.prompt, 180) }}</p>
+                      <p class="text-xs text-slate-400 mt-1">{{ item.type }} · {{ item.model || '-' }} · {{ new Date(item.updatedAt).toLocaleString() }}</p>
+                      <p v-if="item.reason" class="text-xs text-red-500 mt-2 break-words leading-5">{{ shortText(item.reason, 160) }}</p>
+                    </div>
+                    <button @click="taskFilterStatus = 'FAILED'; taskFilterPrompt = item.prompt; taskFilterError = ''; currentTab = 'tasks'; fetchTasks(1)" class="text-xs font-black text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-xl shrink-0">{{ riskScorePercent(item.similarity) }}</button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div v-if="stats?.failures?.byPrompt?.length" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="font-black text-slate-800">高频失败提示词</h3>
-            <button @click="fetchStats" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">更新统计</button>
-          </div>
-          <div class="flex flex-wrap gap-2">
-            <button v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" @click="openRiskWithPrompt(item.prompt, item.model, item.type)" class="text-xs text-left bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 rounded-lg px-3 py-2 max-w-sm">
-              <span class="font-bold">{{ item.count }} 次</span>
-              <span class="ml-2">{{ item.promptPreview }}</span>
-            </button>
+          <div class="space-y-6">
+            <div class="bg-slate-950 text-white rounded-3xl shadow-sm p-6">
+              <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">风险结论</p>
+              <template v-if="riskResult">
+                <div class="mt-4 inline-flex px-4 py-2 rounded-xl border text-sm font-black bg-white/10 border-white/10" :class="riskResult.level === 'clear' ? 'text-emerald-300' : riskResult.level === 'high' ? 'text-red-300' : 'text-amber-300'">{{ riskLevelLabel(riskResult.level) }}</div>
+                <div class="mt-6">
+                  <div class="flex items-end justify-between">
+                    <p class="text-5xl font-black">{{ riskScorePercent(riskResult.highestSimilarity || 0) }}</p>
+                    <p class="text-xs text-slate-400 pb-2">最高相似度</p>
+                  </div>
+                  <div class="h-2 bg-white/10 rounded-full overflow-hidden mt-4">
+                    <div class="h-full rounded-full" :class="riskResult.level === 'clear' ? 'bg-emerald-400' : riskResult.level === 'high' ? 'bg-red-400' : 'bg-amber-400'" :style="{ width: riskScorePercent(riskResult.highestSimilarity || 0) }"></div>
+                  </div>
+                </div>
+                <p class="text-sm text-slate-300 leading-6 mt-6">{{ riskResult.suggestion }}</p>
+              </template>
+              <template v-else>
+                <p class="text-4xl font-black mt-5">待检查</p>
+                <p class="text-sm text-slate-400 leading-6 mt-3">粘贴提示词后开始预检，系统会返回与历史失败记录的相似度和可追溯任务。</p>
+              </template>
+            </div>
+
+            <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
+              <div class="flex items-center justify-between mb-4">
+                <div>
+                  <h3 class="font-black text-slate-900">高频失败提示词</h3>
+                  <p class="text-xs text-slate-400 mt-1">用于快速复核和改写</p>
+                </div>
+                <button @click="fetchStats" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">更新</button>
+              </div>
+              <div v-if="!stats?.failures?.byPrompt?.length" class="text-sm text-slate-400 py-8 text-center border border-dashed border-slate-200 rounded-2xl">暂无失败提示词数据</div>
+              <div v-else class="space-y-2">
+                <button v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" @click="openRiskWithPrompt(item.prompt, item.model, item.type)" class="w-full text-left bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 rounded-2xl px-4 py-3 transition">
+                  <div class="flex items-start justify-between gap-3">
+                    <span class="text-xs leading-5">{{ item.promptPreview }}</span>
+                    <span class="text-xs font-black shrink-0">{{ item.count }}</span>
+                  </div>
+                  <p class="text-[11px] text-red-400 mt-1">{{ item.type }} · {{ item.model || '-' }}</p>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
