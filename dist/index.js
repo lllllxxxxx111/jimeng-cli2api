@@ -39,7 +39,8 @@ app.use((0, cors_1.default)({
         }
     },
 }));
-app.use(express_1.default.json());
+app.use(express_1.default.json({ limit: '64mb' }));
+app.use(express_1.default.urlencoded({ extended: true, limit: '64mb' }));
 // 托管根目录静态文件（test_client.html 等）
 app.use(express_1.default.static(path_1.default.resolve(__dirname, '..')));
 // 托管前端构建产物（frontend/dist）

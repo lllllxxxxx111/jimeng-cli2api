@@ -1519,6 +1519,64 @@ onMounted(() => {
           <h2 class="text-3xl font-black text-slate-800">即梦Cli_api 集成文档</h2>
           <p class="text-slate-500 mt-1">企业级封装 • 兼容 OpenAI 格式 • 原生多模态</p>
         </div>
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <div>
+              <h3 class="font-extrabold text-slate-800 text-lg">Responses API 兼容入口</h3>
+              <p class="text-sm text-slate-500 mt-1">新版 SDK 可走 <code class="bg-slate-100 px-1 rounded font-mono">client.responses.create</code>；视频、多模态、多帧和放大通过 metadata 扩展字段对齐即梦 CLI。</p>
+            </div>
+            <span class="text-xs font-black text-indigo-700 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-full">新老接口并存</span>
+          </div>
+          <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div class="border border-slate-100 rounded-xl p-4 bg-slate-50">
+              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">OpenAI SDK 文生图</p>
+              <pre class="bg-slate-900 text-indigo-200 p-4 rounded-xl font-mono text-xs overflow-x-auto leading-relaxed">const client = new OpenAI({
+  apiKey: "sk-jm-xxx",
+  baseURL: "http://&lt;server&gt;:3000/v1",
+});
+
+const resp = await client.responses.create({
+  model: "5.0",
+  input: "a cinematic cat portrait",
+  tools: [{ type: "image_generation" }],
+  metadata: {
+    ratio: "16:9",
+    resolution_type: "4k",
+    session: 0
+  }
+});</pre>
+            </div>
+            <div class="border border-slate-100 rounded-xl p-4 bg-slate-50">
+              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">OpenAI SDK 生视频</p>
+              <pre class="bg-slate-900 text-sky-200 p-4 rounded-xl font-mono text-xs overflow-x-auto leading-relaxed">const video = await client.videos.create({
+  model: "sora-2",
+  prompt: "city night, camera push in",
+  size: "1280x720",
+  seconds: 5,
+});
+
+const latest = await client.videos.retrieve(video.id);</pre>
+            </div>
+            <div class="border border-slate-100 rounded-xl p-4 bg-slate-50">
+              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Responses 扩展调用视频</p>
+              <pre class="bg-slate-900 text-emerald-200 p-4 rounded-xl font-mono text-xs overflow-x-auto leading-relaxed">{
+  "model": "seedance2.0fast",
+  "input": "city night, camera push in",
+  "metadata": {
+    "operation": "text2video",
+    "duration": 5,
+    "ratio": "16:9",
+    "video_resolution": "720p"
+  }
+}</pre>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-600">
+            <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-3"><strong class="text-indigo-700">POST /v1/responses</strong><br />提交任务，返回 in_progress 和 task_id</div>
+            <div class="bg-emerald-50 border border-emerald-100 rounded-xl p-3"><strong class="text-emerald-700">POST /v1/videos</strong><br />兼容新版 SDK 视频创建和轮询</div>
+            <div class="bg-amber-50 border border-amber-100 rounded-xl p-3"><strong class="text-amber-700">扩展字段</strong><br />metadata.operation 支持全部生成类 CLI</div>
+          </div>
+        </div>
         <div class="bg-amber-50 border border-amber-200 rounded-2xl p-6">
           <h3 class="font-extrabold text-amber-900 text-lg mb-3">🔑 如何获取 API Key</h3>
           <ol class="text-sm text-amber-800 space-y-2 list-decimal pl-5">

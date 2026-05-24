@@ -1,14 +1,14 @@
 /**
  * @file openai.ts
- * @description 处理 OpenAI 标准的生图、生视频路由接口。包含复杂的视频流和多媒体帧校验逻辑，以及 ffmpeg 探测。
+ * @description OpenAI-compatible Dreamina image, video, upscale, and Responses routes.
  * @author XiaoYue <43854695@qq.com>
  * @license MIT
  * @date 2026-04-17
- * 
- * [! 防屎山规范 !]
- * - 绝对不要在此文件写死任何 API KEY 或硬编码文件路径！
- * - 所有的多媒体时长、帧率校验规则集中在此文件的顶部常量中管理。
- * - 使用 ffprobe 进行实际的多媒体探测，不依赖文件后缀做武断判断。
+ *
+ * Guardrails:
+ * - Do not hard-code API keys or machine-local media paths in this file.
+ * - Keep media size, duration, and frame-rate validation near the constants below.
+ * - Use ffprobe for real video/audio metadata instead of trusting filename suffixes.
  */
 
 import { Router, Request, Response } from 'express';
@@ -17,8 +17,11 @@ import { accountService } from '../services/accountService';
 import { runJimengCommand } from '../utils/cliRunner';
 import multer from 'multer';
 import fs from 'fs';
+import path from 'path';
+import axios from 'axios';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomUUID } from 'crypto';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -33,11 +36,24 @@ const REQUEST_MAX_BYTES = 64 * MB;
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif', '.gif']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov']);
 const AUDIO_EXTS = new Set(['.wav', '.mp3']);
+const TEMP_UPLOAD_ROOT = path.resolve(process.cwd(), 'temp_uploads');
+const responsesUpload = multer({
+  dest: 'temp_uploads/',
+  limits: { fileSize: VIDEO_MAX_BYTES, files: 30 },
+});
 
 type ValidationDetail = {
   field: string;
   file?: string;
   message: string;
+};
+
+type DispatchResult = {
+  id: string;
+  status: 'processing';
+  submit_id: string;
+  task_type: string;
+  model: string | null;
 };
 
 const normalizeVideoModelVersion = (raw: string): string => {
@@ -100,6 +116,25 @@ const TEXT2IMAGE_RESOLUTIONS_BY_MODEL = new Map<string, Set<string>>([
 const IMAGE2IMAGE_RESOLUTIONS = new Set(['2k', '4k']);
 const UPSCALE_RESOLUTIONS = new Set(['2k', '4k', '8k']);
 const MODEL_CAPABILITIES = new Map<string, Set<string>>();
+const VIDEO_TASK_TYPES = ['text2video', 'image2video', 'frames2video', 'multiframe2video', 'multimodal2video'];
+const OPENAI_VIDEO_MODEL_ALIASES: Record<string, string> = {
+  'sora-2': 'seedance2.0fast',
+  'sora-2-pro': 'seedance2.0_vip',
+};
+const OPENAI_VIDEO_SIZE_TO_RATIO: Record<string, string> = {
+  '720x1280': '9:16',
+  '1280x720': '16:9',
+  '1024x1792': '9:16',
+  '1792x1024': '16:9',
+};
+const RATIO_TO_OPENAI_VIDEO_SIZE: Record<string, string> = {
+  '1:1': '1024x1024',
+  '3:4': '720x960',
+  '4:3': '960x720',
+  '9:16': '720x1280',
+  '16:9': '1280x720',
+  '21:9': '1792x768',
+};
 
 type VideoMode = 'text2video' | 'image2video' | 'frames2video' | 'multiframe2video' | 'multimodal2video';
 type AutoVideoMode = VideoMode | 'auto';
@@ -169,17 +204,73 @@ const getVideoDurationRange = (mode: VideoMode, model: string): [number, number]
 const cleanupUploadedFiles = (files: Express.Multer.File[] | undefined) => {
   if (!files) return;
   for (const file of files) {
-    try {
-      fs.unlinkSync(file.path);
-    } catch {}
+    cleanupUploadedFile(file);
   }
 };
 
 const cleanupUploadedFile = (file: Express.Multer.File | undefined) => {
-  if (!file) return;
+  if (!file || !isManagedTempFile(file)) return;
+  const resolved = path.resolve(process.cwd(), file.path);
   try {
-    fs.unlinkSync(file.path);
+    fs.unlinkSync(resolved);
   } catch {}
+};
+
+const isManagedTempFile = (file: Express.Multer.File): boolean => {
+  const resolved = path.resolve(process.cwd(), file.path);
+  const relative = path.relative(TEMP_UPLOAD_ROOT, resolved);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+};
+
+const createEmptyMediaFilesMap = (): Record<RefType, Express.Multer.File[]> => ({
+  image: [],
+  video: [],
+  audio: [],
+});
+
+const classifyMediaFileType = (file: Express.Multer.File): RefType => {
+  const field = String(file.fieldname || '').toLowerCase();
+  const ext = getExt(file.originalname || file.filename);
+  const mime = String(file.mimetype || '').toLowerCase();
+  if (field === 'input_reference' || field.includes('image') || mime.startsWith('image/')) return 'image';
+  if (field.includes('audio') || mime.startsWith('audio/')) return 'audio';
+  if (field.includes('video') || mime.startsWith('video/')) return 'video';
+  if (field.includes('audio') || AUDIO_EXTS.has(ext)) return 'audio';
+  if (field.includes('video') || VIDEO_EXTS.has(ext)) return 'video';
+  return 'image';
+};
+
+const normalizeUploadedMediaFiles = (
+  uploaded: Express.Multer.File[] | { [fieldname: string]: Express.Multer.File[] } | undefined
+): { filesMap: Record<RefType, Express.Multer.File[]>; files: Express.Multer.File[] } => {
+  const filesMap = createEmptyMediaFilesMap();
+  const imageFirst: Express.Multer.File[] = [];
+  const imageMiddle: Express.Multer.File[] = [];
+  const imageLast: Express.Multer.File[] = [];
+  const files: Express.Multer.File[] = [];
+
+  const add = (file: Express.Multer.File) => {
+    files.push(file);
+    const type = classifyMediaFileType(file);
+    if (type !== 'image') {
+      filesMap[type].push(file);
+      return;
+    }
+
+    const field = String(file.fieldname || '').toLowerCase();
+    if (field === 'first' || field.includes('first')) imageFirst.push(file);
+    else if (field === 'last' || field.includes('last')) imageLast.push(file);
+    else imageMiddle.push(file);
+  };
+
+  if (Array.isArray(uploaded)) {
+    uploaded.forEach(add);
+  } else if (uploaded) {
+    Object.values(uploaded).flat().forEach(add);
+  }
+
+  filesMap.image.push(...imageFirst, ...imageMiddle, ...imageLast);
+  return { filesMap, files };
 };
 
 const parseIntegerField = (value: any): number | null => {
@@ -197,6 +288,10 @@ const parseFloatField = (value: any): number | null => {
 };
 
 const shellQuote = (value: string): string => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+const getCliFilePath = (file: Express.Multer.File): string => {
+  return path.isAbsolute(file.path) ? file.path : path.resolve(process.cwd(), file.path);
+};
 
 const buildSessionParam = (raw: any): string => {
   const text = getFirstBodyValue(raw);
@@ -422,7 +517,7 @@ const validateSeedance2Inputs = async (
   if (totalBytes > REQUEST_MAX_BYTES) {
     details.push({
       field: 'request',
-      message: `请求体文件总大小超限：${(totalBytes / MB).toFixed(2)}MB，最大允许 64MB`,
+      message: `request files total ${(totalBytes / MB).toFixed(2)}MB exceeds the 64MB limit`,
     });
   }
 
@@ -434,7 +529,7 @@ const validateSeedance2Inputs = async (
   if (hasVideoOrAudio && !canProbe) {
     details.push({
       field: 'server',
-      message: '服务器缺少 ffprobe，无法校验视频/音频时长、分辨率与帧率。请安装 ffmpeg/ffprobe 后重试。',
+      message: 'ffprobe is required to validate video/audio duration, resolution, and frame rate',
     });
     return details;
   }
@@ -445,25 +540,25 @@ const validateSeedance2Inputs = async (
 
     if (item.type === 'image') {
       if (!IMAGE_EXTS.has(ext)) {
-        details.push({ field: 'image', file: f.originalname, message: '图片格式不支持，仅支持 jpeg/png/webp/bmp/tiff/gif' });
+        details.push({ field: 'image', file: f.originalname, message: 'unsupported image format; use jpeg/png/webp/bmp/tiff/gif' });
       }
       if (f.size > IMAGE_MAX_BYTES) {
-        details.push({ field: 'image', file: f.originalname, message: `图片大小超限：${(f.size / MB).toFixed(2)}MB，最大 30MB` });
+        details.push({ field: 'image', file: f.originalname, message: `image size ${(f.size / MB).toFixed(2)}MB exceeds the 30MB limit` });
       }
       continue;
     }
 
     if (item.type === 'video') {
       if (!VIDEO_EXTS.has(ext)) {
-        details.push({ field: 'video', file: f.originalname, message: '视频格式不支持，仅支持 mp4/mov' });
+        details.push({ field: 'video', file: f.originalname, message: 'unsupported video format; use mp4/mov' });
       }
       if (f.size > VIDEO_MAX_BYTES) {
-        details.push({ field: 'video', file: f.originalname, message: `视频大小超限：${(f.size / MB).toFixed(2)}MB，最大 50MB` });
+        details.push({ field: 'video', file: f.originalname, message: `video size ${(f.size / MB).toFixed(2)}MB exceeds the 50MB limit` });
       }
 
       const probe = await probeMedia(f.path);
       if (!probe || !Number.isFinite(probe.duration as number) || !Number.isFinite(probe.width as number) || !Number.isFinite(probe.height as number)) {
-        details.push({ field: 'video', file: f.originalname, message: '无法读取视频元信息（时长/分辨率），请检查文件是否损坏。' });
+        details.push({ field: 'video', file: f.originalname, message: 'unable to read video metadata; check whether the file is valid' });
         continue;
       }
 
@@ -476,55 +571,54 @@ const validateSeedance2Inputs = async (
       videoDurationTotal += d;
 
       if (d < 2 || d > 15) {
-        details.push({ field: 'video', file: f.originalname, message: `视频时长需在 [2, 15] 秒，当前 ${d.toFixed(2)} 秒` });
+        details.push({ field: 'video', file: f.originalname, message: `video duration must be in [2, 15] seconds, got ${d.toFixed(2)}` });
       }
       if (ratio < 0.4 || ratio > 2.5) {
-        details.push({ field: 'video', file: f.originalname, message: `视频宽高比需在 [0.4, 2.5]，当前 ${ratio.toFixed(3)}` });
+        details.push({ field: 'video', file: f.originalname, message: `video aspect ratio must be in [0.4, 2.5], got ${ratio.toFixed(3)}` });
       }
       if (w < 300 || w > 6000 || h < 300 || h > 6000) {
-        details.push({ field: 'video', file: f.originalname, message: `视频宽高像素需在 [300, 6000]，当前 ${w}x${h}` });
+        details.push({ field: 'video', file: f.originalname, message: `video width/height must be in [300, 6000], got ${w}x${h}` });
       }
       if (pixels < 409600 || pixels > 2086876) {
-        details.push({ field: 'video', file: f.originalname, message: `视频像素总量需在 [409600, 2086876]，当前 ${pixels}` });
+        details.push({ field: 'video', file: f.originalname, message: `video pixel count must be in [409600, 2086876], got ${pixels}` });
       }
       if (Number.isFinite(probe.fps as number)) {
         const fps = probe.fps as number;
         if (fps < 24 || fps > 60) {
-          details.push({ field: 'video', file: f.originalname, message: `视频帧率需在 [24, 60] FPS，当前 ${fps.toFixed(2)} FPS` });
+          details.push({ field: 'video', file: f.originalname, message: `video frame rate must be in [24, 60] FPS, got ${fps.toFixed(2)}` });
         }
       }
       continue;
     }
 
     if (!AUDIO_EXTS.has(ext)) {
-      details.push({ field: 'audio', file: f.originalname, message: '音频格式不支持，仅支持 wav/mp3' });
+      details.push({ field: 'audio', file: f.originalname, message: 'unsupported audio format; use wav/mp3' });
     }
     if (f.size > AUDIO_MAX_BYTES) {
-      details.push({ field: 'audio', file: f.originalname, message: `音频大小超限：${(f.size / MB).toFixed(2)}MB，最大 15MB` });
+      details.push({ field: 'audio', file: f.originalname, message: `audio size ${(f.size / MB).toFixed(2)}MB exceeds the 15MB limit` });
     }
 
     const probe = await probeMedia(f.path);
     if (!probe || !Number.isFinite(probe.duration as number)) {
-      details.push({ field: 'audio', file: f.originalname, message: '无法读取音频时长，请检查文件是否损坏。' });
+      details.push({ field: 'audio', file: f.originalname, message: 'unable to read audio duration; check whether the file is valid' });
       continue;
     }
     const d = probe.duration as number;
     audioDurationTotal += d;
     if (d < 2 || d > 15) {
-      details.push({ field: 'audio', file: f.originalname, message: `音频时长需在 [2, 15] 秒，当前 ${d.toFixed(2)} 秒` });
+      details.push({ field: 'audio', file: f.originalname, message: `audio duration must be in [2, 15] seconds, got ${d.toFixed(2)}` });
     }
   }
 
   if (videoDurationTotal > 15) {
-    details.push({ field: 'video', message: `所有视频总时长超限：${videoDurationTotal.toFixed(2)} 秒，最大 15 秒` });
+    details.push({ field: 'video', message: `total video duration ${videoDurationTotal.toFixed(2)} seconds exceeds the 15 second limit` });
   }
   if (audioDurationTotal > 15) {
-    details.push({ field: 'audio', message: `所有音频总时长超限：${audioDurationTotal.toFixed(2)} 秒，最大 15 秒` });
+    details.push({ field: 'audio', message: `total audio duration ${audioDurationTotal.toFixed(2)} seconds exceeds the 15 second limit` });
   }
 
   return details;
 };
-
 const normalizeReferenceOrder = (raw: any): RefOrderItem[] => {
   if (!raw) return [];
 
@@ -606,6 +700,790 @@ const buildOrderedMedia = (
   return ordered;
 };
 
+const getMimeExt = (mimeType: string): string => {
+  const mime = mimeType.toLowerCase();
+  if (mime.includes('jpeg')) return '.jpg';
+  if (mime.includes('png')) return '.png';
+  if (mime.includes('webp')) return '.webp';
+  if (mime.includes('gif')) return '.gif';
+  if (mime.includes('bmp')) return '.bmp';
+  if (mime.includes('tiff')) return '.tiff';
+  if (mime.includes('mp4')) return '.mp4';
+  if (mime.includes('quicktime')) return '.mov';
+  if (mime.includes('mpeg') || mime.includes('mp3')) return '.mp3';
+  if (mime.includes('wav')) return '.wav';
+  return '';
+};
+
+const makeTempFileFromBuffer = (buffer: Buffer, ext: string, originalName: string): Express.Multer.File => {
+  fs.mkdirSync(TEMP_UPLOAD_ROOT, { recursive: true });
+  const filename = `${randomUUID()}${ext || '.bin'}`;
+  const filePath = path.join(TEMP_UPLOAD_ROOT, filename);
+  fs.writeFileSync(filePath, buffer);
+  return {
+    fieldname: 'response_input',
+    originalname: originalName,
+    encoding: '7bit',
+    mimetype: '',
+    destination: 'temp_uploads/',
+    filename,
+    path: path.relative(process.cwd(), filePath).replace(/\\/g, '/'),
+    size: buffer.length,
+  } as Express.Multer.File;
+};
+
+const inferMimeType = (ext: string, type: RefType) => {
+  const lower = ext.toLowerCase();
+  if (lower === '.jpg' || lower === '.jpeg') return 'image/jpeg';
+  if (lower === '.png') return 'image/png';
+  if (lower === '.webp') return 'image/webp';
+  if (lower === '.gif') return 'image/gif';
+  if (lower === '.bmp') return 'image/bmp';
+  if (lower === '.tif' || lower === '.tiff') return 'image/tiff';
+  if (lower === '.mp4') return 'video/mp4';
+  if (lower === '.mov') return 'video/quicktime';
+  if (lower === '.mp3') return 'audio/mpeg';
+  if (lower === '.wav') return 'audio/wav';
+  return type === 'video' ? 'video/mp4' : type === 'audio' ? 'audio/mpeg' : 'image/png';
+};
+
+const saveResponseInputFile = async (input: string, type: RefType): Promise<Express.Multer.File> => {
+  const text = input.trim();
+  if (!text) throw httpError(400, 'file input cannot be empty');
+
+  const dataUrl = text.match(/^data:([^;]+);base64,(.+)$/i);
+  if (dataUrl) {
+    const mime = dataUrl[1] || '';
+    const buffer = Buffer.from(dataUrl[2] || '', 'base64');
+    const ext = getMimeExt(mime) || (type === 'video' ? '.mp4' : type === 'audio' ? '.mp3' : '.png');
+    const file = makeTempFileFromBuffer(buffer, ext, `input${ext}`);
+    file.mimetype = mime || inferMimeType(ext, type);
+    return file;
+  }
+
+  if (text.startsWith('http://') || text.startsWith('https://')) {
+    const response = await axios({ url: text, responseType: 'arraybuffer', timeout: 30000 });
+    const mime = String(response.headers?.['content-type'] || '');
+    const buffer = Buffer.from(response.data);
+    const ext = getMimeExt(mime) || path.extname(new URL(text).pathname) || '.bin';
+    const file = makeTempFileFromBuffer(buffer, ext, path.basename(new URL(text).pathname) || `remote-input${ext}`);
+    file.mimetype = mime || inferMimeType(ext, type);
+    return file;
+  }
+
+  const resolved = path.resolve(text);
+  if (!fs.existsSync(resolved)) throw httpError(400, `input file does not exist: ${text}`);
+  const rel = path.relative(process.cwd(), resolved).replace(/\\/g, '/');
+  return {
+    fieldname: 'response_input',
+    originalname: path.basename(resolved),
+    encoding: '7bit',
+    mimetype: inferMimeType(path.extname(resolved), type),
+    destination: path.dirname(resolved),
+    filename: path.basename(resolved),
+    path: path.isAbsolute(rel) || rel.startsWith('..') ? resolved : rel,
+    size: fs.statSync(resolved).size,
+  } as Express.Multer.File;
+};
+
+const httpError = (statusCode: number, message: string) => {
+  const error = new Error(message);
+  (error as any).statusCode = statusCode;
+  return error;
+};
+
+const getHttpStatus = (error: any) => error?.statusCode || error?.status || 500;
+
+const getNoVipStatus = (message: string) => {
+  return /vip|member|会员/i.test(message) ? 'NO_VIP' : 'ERROR';
+};
+
+const flattenText = (value: any): string[] => {
+  if (value === undefined || value === null) return [];
+  if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+  if (Array.isArray(value)) return value.flatMap(item => flattenText(item));
+  if (typeof value === 'object') {
+    const type = String(value.type || '');
+    if (typeof value.text === 'string' && (type === '' || type.includes('text') || type === 'input_text')) return [value.text.trim()].filter(Boolean);
+    if (typeof value.content === 'string') return [value.content.trim()].filter(Boolean);
+    if (Array.isArray(value.content)) return flattenText(value.content);
+    if (Array.isArray(value.input)) return flattenText(value.input);
+  }
+  return [];
+};
+
+const extractResponsesPrompt = (body: any): string => {
+  const texts = flattenText(body.input);
+  return texts.join('\n').trim();
+};
+
+const getInputUrlsByType = (value: any): Array<{ type: RefType; url: string }> => {
+  const out: Array<{ type: RefType; url: string }> = [];
+  const visit = (node: any) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (typeof node !== 'object') return;
+    const nodeType = String(node.type || '');
+    const url = node.image_url || node.video_url || node.audio_url || node.file_url || node.url;
+    if (typeof url === 'string') {
+      if (nodeType.includes('audio') || node.audio_url) out.push({ type: 'audio', url });
+      else if (nodeType.includes('video') || node.video_url) out.push({ type: 'video', url });
+      else if (nodeType.includes('image') || node.image_url) out.push({ type: 'image', url });
+    }
+    if (Array.isArray(node.content)) visit(node.content);
+    if (Array.isArray(node.input)) visit(node.input);
+  };
+  visit(value);
+  return out;
+};
+
+const getResponsesMetadata = (body: any) => {
+  return {
+    ...(body?.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+    ...(body?.dreamina && typeof body.dreamina === 'object' ? body.dreamina : {}),
+  } as Record<string, any>;
+};
+
+const getToolTypes = (body: any): string[] => {
+  return Array.isArray(body?.tools)
+    ? body.tools.map((tool: any) => String(tool?.type || '').trim()).filter(Boolean)
+    : [];
+};
+
+const mapTaskStatusToResponseStatus = (status: string) => {
+  if (status === 'SUCCESS') return 'completed';
+  if (status === 'FAILED') return 'failed';
+  return 'in_progress';
+};
+
+const mapTaskStatusToOpenAIVideoStatus = (status: string) => {
+  if (status === 'SUCCESS') return 'completed';
+  if (status === 'FAILED') return 'failed';
+  return 'queued';
+};
+
+const buildResponseObject = (task: any) => {
+  const responseId = `resp_${task.id}`;
+  const status = mapTaskStatusToResponseStatus(task.status);
+  const createdAt = Math.floor(new Date(task.createdAt).getTime() / 1000);
+  const resultUrl = task.resultUrl || null;
+  const isVideo = VIDEO_TASK_TYPES.includes(task.type);
+  const outputType = isVideo ? 'dreamina_video_generation_call' : 'image_generation_call';
+  const output: any[] = [];
+
+  if (status === 'completed') {
+    output.push({
+      id: `ig_${task.id}`,
+      type: outputType,
+      status: 'completed',
+      result: resultUrl,
+      url: resultUrl,
+    });
+  } else if (status === 'failed') {
+    output.push({
+      id: `ig_${task.id}`,
+      type: outputType,
+      status: 'failed',
+      error: task.errorMsg || 'Generation failed',
+    });
+  }
+
+  const response: any = {
+    id: responseId,
+    object: 'response',
+    created_at: createdAt,
+    status,
+    model: task.model || task.type,
+    output,
+    output_text: '',
+    metadata: {
+      task_id: task.id,
+      submit_id: task.jimengSubmitId,
+      task_type: task.type,
+      log_id: task.jimengLogId,
+      result_url: resultUrl,
+    },
+  };
+
+  if (status === 'failed') {
+    response.error = { message: task.errorMsg || 'Generation failed' };
+  }
+  if (task.pollErrorMsg) {
+    response.metadata.poll_warning = task.pollErrorMsg;
+  }
+  return response;
+};
+
+const buildResponseObjectFromDispatch = (result: DispatchResult) => ({
+  id: `resp_${result.id}`,
+  object: 'response',
+  created_at: Math.floor(Date.now() / 1000),
+  status: 'in_progress',
+  model: result.model || result.task_type,
+  output: [],
+  output_text: '',
+  metadata: {
+    task_id: result.id,
+    submit_id: result.submit_id,
+    task_type: result.task_type,
+  },
+});
+
+const buildOpenAIVideoObject = (task: any) => {
+  const status = mapTaskStatusToOpenAIVideoStatus(task.status);
+  const createdAt = Math.floor(new Date(task.createdAt).getTime() / 1000);
+  const resultUrl = task.resultUrl || null;
+  const ratio = task.metadata?.ratio || null;
+  const response: any = {
+    id: `video_${task.id}`,
+    object: 'video',
+    created_at: createdAt,
+    status,
+    model: task.model || task.type,
+    progress: status === 'completed' ? 100 : 0,
+    seconds: task.metadata?.duration ?? null,
+    size: ratio ? RATIO_TO_OPENAI_VIDEO_SIZE[String(ratio)] || null : null,
+    metadata: {
+      task_id: task.id,
+      submit_id: task.jimengSubmitId,
+      task_type: task.type,
+      log_id: task.jimengLogId,
+      result_url: resultUrl,
+      dreamina_model: task.model,
+    },
+  };
+
+  if (status === 'completed') {
+    response.result_url = resultUrl;
+  }
+  if (status === 'failed') {
+    response.error = { message: task.errorMsg || 'Video generation failed' };
+  }
+  if (task.pollErrorMsg) {
+    response.metadata.poll_warning = task.pollErrorMsg;
+  }
+  return response;
+};
+
+const buildOpenAIVideoObjectFromDispatch = (result: DispatchResult) => ({
+  id: `video_${result.id}`,
+  object: 'video',
+  created_at: Math.floor(Date.now() / 1000),
+  status: 'queued',
+  model: result.model || result.task_type,
+  progress: 0,
+  seconds: null,
+  size: null,
+  metadata: {
+    task_id: result.id,
+    submit_id: result.submit_id,
+    task_type: result.task_type,
+    dreamina_model: result.model,
+  },
+});
+
+const collectResponsesFiles = async (req: Request, body: any): Promise<{
+  filesMap: Record<RefType, Express.Multer.File[]>;
+  cleanupFiles: Express.Multer.File[];
+}> => {
+  const uploaded = (req.files as Express.Multer.File[] | { [fieldname: string]: Express.Multer.File[] } | undefined);
+  const { filesMap, files } = normalizeUploadedMediaFiles(uploaded);
+  const cleanupFiles: Express.Multer.File[] = [...files];
+
+  const metadata = getResponsesMetadata(body);
+  const explicitInputs = [
+    ...parseBodyList(metadata.image_urls ?? metadata.images).map(url => ({ type: 'image' as RefType, url })),
+    ...parseBodyList(metadata.video_urls ?? metadata.videos).map(url => ({ type: 'video' as RefType, url })),
+    ...parseBodyList(metadata.audio_urls ?? metadata.audios).map(url => ({ type: 'audio' as RefType, url })),
+    ...getInputUrlsByType(body.input),
+  ];
+
+  for (const item of explicitInputs) {
+    const file = await saveResponseInputFile(item.url, item.type);
+    filesMap[item.type].push(file);
+    cleanupFiles.push(file);
+  }
+
+  return { filesMap, cleanupFiles };
+};
+
+const normalizeResponsesBody = async (req: Request) => {
+  const rawBody = req.body || {};
+  if (typeof rawBody.payload === 'string') {
+    try {
+      return { ...rawBody, ...JSON.parse(rawBody.payload) };
+    } catch {
+      throw httpError(400, 'payload must be valid JSON');
+    }
+  }
+  if (typeof rawBody.request === 'string') {
+    try {
+      return { ...rawBody, ...JSON.parse(rawBody.request) };
+    } catch {
+      throw httpError(400, 'request must be valid JSON');
+    }
+  }
+  return rawBody;
+};
+
+const createResponsesDispatch = async (req: Request): Promise<DispatchResult> => {
+  const body = await normalizeResponsesBody(req);
+  const metadata = getResponsesMetadata(body);
+  const prompt = getFirstBodyValue(metadata.prompt ?? body.prompt) || extractResponsesPrompt(body);
+  const toolTypes = getToolTypes(body);
+  const operation = String(metadata.operation || metadata.mode || body.operation || '').trim();
+  const normalizedOperation = operation.toLowerCase();
+  const { filesMap, cleanupFiles } = await collectResponsesFiles(req, body);
+  const imageFiles = filesMap.image || [];
+  const videoFiles = filesMap.video || [];
+  const audioFiles = filesMap.audio || [];
+
+  const commonBody: Record<string, any> = {
+    ...metadata,
+    prompt,
+    model: metadata.model ?? body.model,
+    session: metadata.session,
+    ratio: metadata.ratio,
+    resolution_type: metadata.resolution_type,
+    duration: metadata.duration,
+    video_resolution: metadata.video_resolution,
+    transition_prompt: metadata.transition_prompt ?? metadata.transition_prompts,
+    transition_duration: metadata.transition_duration ?? metadata.transition_durations,
+    reference_order: metadata.reference_order,
+  };
+
+  try {
+    if (normalizedOperation === 'image_upscale' || normalizedOperation === 'upscale') {
+      return await dispatchUpscaleTask(req, commonBody, imageFiles[0]);
+    }
+
+    const wantsVideo = normalizedOperation.includes('video')
+      || toolTypes.includes('dreamina_video_generation')
+      || videoFiles.length > 0
+      || audioFiles.length > 0
+      || Boolean(metadata.video_resolution)
+      || Boolean(metadata.duration)
+      || ['text2video', 'image2video', 'frames2video', 'multiframe2video', 'multimodal2video'].includes(String(metadata.mode || '').toLowerCase());
+
+    if (wantsVideo) {
+      return await dispatchVideoTask(req, { ...commonBody, mode: metadata.mode || operation || 'auto' }, filesMap);
+    }
+
+    if (!toolTypes.length || toolTypes.includes('image_generation') || normalizedOperation.includes('image') || imageFiles.length > 0) {
+      return await dispatchImageTask(req, commonBody, imageFiles);
+    }
+
+    throw httpError(400, 'Responses request must use image_generation, dreamina_video_generation, or metadata.operation.');
+  } catch (error) {
+    cleanupUploadedFiles(cleanupFiles);
+    throw error;
+  }
+};
+
+const normalizeOpenAIVideoBody = (body: Record<string, any>) => {
+  const modelInput = getFirstBodyValue(body.model) || 'seedance2.0fast';
+  const model = OPENAI_VIDEO_MODEL_ALIASES[modelInput] || modelInput;
+  const size = getFirstBodyValue(body.size);
+  const seconds = getFirstBodyValue(body.seconds);
+  const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+
+  return {
+    ...metadata,
+    ...body,
+    model,
+    prompt: getFirstBodyValue(body.prompt ?? body.input) || getFirstBodyValue(metadata.prompt),
+    mode: metadata.mode || metadata.operation || body.mode || body.operation || 'auto',
+    duration: body.duration ?? seconds ?? metadata.duration,
+    ratio: body.ratio ?? metadata.ratio ?? (size ? OPENAI_VIDEO_SIZE_TO_RATIO[size] : undefined),
+    video_resolution: body.video_resolution ?? metadata.video_resolution,
+    transition_prompt: body.transition_prompt ?? body.transition_prompts ?? metadata.transition_prompt ?? metadata.transition_prompts,
+    transition_duration: body.transition_duration ?? body.transition_durations ?? metadata.transition_duration ?? metadata.transition_durations,
+    reference_order: body.reference_order ?? metadata.reference_order,
+  };
+};
+
+const getVideoTaskByPublicId = async (req: Request, rawId: string) => {
+  const taskId = rawId.startsWith('video_') ? rawId.slice(6) : rawId;
+  const task = await prisma.task.findUnique({
+    where: { id: taskId },
+    include: { account: true, apiKey: true },
+  });
+
+  if (!task || task.apiKeyId !== (req as any).apiUserId || !VIDEO_TASK_TYPES.includes(task.type)) {
+    return null;
+  }
+  return task;
+};
+
+
+const dispatchQueuedTask = async (
+  req: Request,
+  options: {
+    command: string;
+    type: string;
+    model: string | null;
+    prompt: string;
+  }
+): Promise<DispatchResult> => {
+  let account: any = null;
+  try {
+    account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
+    if (!account) {
+      throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
+    }
+
+    console.log(`[Jimeng Dispatcher] Executing: ${options.command}`);
+
+    const dbTask = await prisma.task.create({
+      data: {
+        apiKeyId: (req as any).apiUserId,
+        accountId: account.id,
+        type: options.type,
+        model: options.model,
+        prompt: options.prompt,
+      },
+    });
+
+    try {
+      const { stdout } = await runJimengCommand(options.command, account.homeDir);
+      const info = extractSubmitInfo(stdout);
+      await prisma.task.update({
+        where: { id: dbTask.id },
+        data: { status: 'PROCESSING', jimengSubmitId: info.submitId, jimengLogId: info.logId },
+      });
+      await accountService.releaseAccount(account.id, 'IDLE');
+
+      return {
+        id: dbTask.id,
+        status: 'processing',
+        submit_id: info.submitId,
+        task_type: options.type,
+        model: options.model,
+      };
+    } catch (cmdErr: any) {
+      await prisma.task.update({
+        where: { id: dbTask.id },
+        data: { status: 'FAILED', errorMsg: cmdErr.message },
+      });
+      await accountService.releaseAccount(account.id, getNoVipStatus(cmdErr.message || ''));
+      throw httpError(500, 'Jimeng CLI failed: ' + cmdErr.message);
+    }
+  } catch (error: any) {
+    if (account && getHttpStatus(error) !== 500) {
+      try { await accountService.releaseAccount(account.id, 'IDLE'); } catch {}
+    }
+    throw error;
+  }
+};
+
+const dispatchImageTask = async (
+  req: Request,
+  body: Record<string, any>,
+  files: Express.Multer.File[]
+): Promise<DispatchResult> => {
+  try {
+    const hasImages = files.length > 0;
+    const prompt = getFirstBodyValue(body.prompt);
+    const model = getFirstBodyValue(body.model) || '5.0';
+    const resolutionType = getFirstBodyValue(body.resolution_type);
+    const ratio = getFirstBodyValue(body.ratio) || '1:1';
+    const sessionParam = buildSessionParam(body.session);
+
+    if (!prompt && !hasImages) {
+      throw httpError(400, "Either 'prompt' or an 'image' file is required.");
+    }
+    if (!IMAGE_RATIOS.has(ratio)) {
+      throw httpError(400, 'ratio must be one of 21:9, 16:9, 3:2, 4:3, 1:1, 3:4, 2:3, 9:16');
+    }
+
+    let command = '';
+    let dbTaskType = '';
+    if (hasImages) {
+      if (files.length > 10) throw httpError(400, 'images must not exceed 10 files');
+      if (!IMAGE2IMAGE_MODELS.has(model)) throw httpError(400, `model ${model} is not supported for image2image`);
+      if (resolutionType && !IMAGE2IMAGE_RESOLUTIONS.has(resolutionType)) {
+        throw httpError(400, 'resolution_type for image2image must be 2k or 4k');
+      }
+      const imagePathsCsv = files.map(getCliFilePath).join(',');
+      const resParam = resolutionType ? ` --resolution_type=${resolutionType}` : '';
+      command = `dreamina image2image --images=${shellQuote(imagePathsCsv)} --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model}${resParam} ${sessionParam} --poll=0`;
+      dbTaskType = 'image2image';
+    } else {
+      const allowed = TEXT2IMAGE_RESOLUTIONS_BY_MODEL.get(model);
+      if (!allowed) throw httpError(400, `model ${model} is not supported for text2image`);
+      if (resolutionType && !allowed.has(resolutionType)) {
+        throw httpError(400, `resolution_type for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
+      }
+      const resParam = resolutionType ? ` --resolution_type=${resolutionType}` : '';
+      command = `dreamina text2image --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model}${resParam} ${sessionParam} --poll=0`;
+      dbTaskType = 'text2image';
+    }
+
+    return await dispatchQueuedTask(req, {
+      command,
+      type: dbTaskType,
+      model,
+      prompt: prompt || '',
+    });
+  } finally {
+    cleanupUploadedFiles(files);
+  }
+};
+
+const dispatchUpscaleTask = async (
+  req: Request,
+  body: Record<string, any>,
+  file: Express.Multer.File | undefined
+): Promise<DispatchResult> => {
+  try {
+    if (!file) throw httpError(400, 'image file is required');
+    const resolutionType = getFirstBodyValue(body.resolution_type) || '2k';
+    if (!UPSCALE_RESOLUTIONS.has(resolutionType)) {
+      throw httpError(400, 'resolution_type must be one of 2k, 4k, 8k');
+    }
+
+    const sessionParam = buildSessionParam(body.session);
+    const imagePath = getCliFilePath(file);
+    const command = `dreamina image_upscale --image=${shellQuote(imagePath)} --resolution_type=${resolutionType} ${sessionParam} --poll=0`;
+
+    return await dispatchQueuedTask(req, {
+      command,
+      type: 'image_upscale',
+      model: 'image_upscale',
+      prompt: `upscale:${resolutionType}`,
+    });
+  } finally {
+    cleanupUploadedFile(file);
+  }
+};
+
+const dispatchVideoTask = async (
+  req: Request,
+  body: Record<string, any>,
+  filesMap: { [fieldname: string]: Express.Multer.File[] }
+): Promise<DispatchResult> => {
+  const allFiles: Express.Multer.File[] = [
+    ...(filesMap.image || []),
+    ...(filesMap.audio || []),
+    ...(filesMap.video || []),
+  ];
+
+  try {
+    const prompt = getFirstBodyValue(body.prompt);
+    const rawModel = getFirstBodyValue(body.model);
+    const modelProvided = rawModel !== undefined;
+    const model = normalizeVideoModelVersion(rawModel || 'seedance2.0fast');
+    const requestedMode = normalizeVideoMode(body.mode ?? body.task_type ?? body.command ?? body.video_mode);
+    const durationRaw = getFirstBodyValue(body.duration);
+    const ratioInput = getFirstBodyValue(body.ratio);
+    const videoResolution = getFirstBodyValue(body.video_resolution);
+    const transitionPromptsRaw = parseBodyList(body.transition_prompt ?? body.transition_prompts);
+    const transitionDurationsRaw = parseBodyList(body.transition_duration ?? body.transition_durations);
+    const sessionParam = buildSessionParam(body.session);
+
+    if (requestedMode === null) {
+      throw httpError(400, 'mode must be one of auto, text2video, image2video, frames2video, multiframe2video, multimodal2video');
+    }
+
+    const referenceOrder = normalizeReferenceOrder(body.reference_order);
+    const orderedMedia = buildOrderedMedia(filesMap, referenceOrder);
+    const imageMedia = orderedMedia.filter(item => item.type === 'image');
+    const videoMedia = orderedMedia.filter(item => item.type === 'video');
+    const audioMedia = orderedMedia.filter(item => item.type === 'audio');
+    const hasImages = imageMedia.length > 0;
+    const hasVideos = videoMedia.length > 0;
+    const hasAudio = audioMedia.length > 0;
+    const hasMedia = orderedMedia.length > 0;
+    const imageCount = imageMedia.length;
+    const videoCount = videoMedia.length;
+    const audioCount = audioMedia.length;
+
+    const autoMode: VideoMode = !hasMedia
+      ? 'text2video'
+      : (hasVideos || hasAudio)
+        ? 'multimodal2video'
+        : imageCount === 1
+          ? 'image2video'
+          : imageCount === 2
+            ? (FRAMES2VIDEO_MODELS.has(model) ? 'frames2video' : 'multiframe2video')
+            : 'multiframe2video';
+    const mode: VideoMode = requestedMode === 'auto' ? autoMode : requestedMode;
+
+    if (hasAudio && !hasImages && !hasVideos) {
+      throw httpError(400, 'Audio-only reference is not supported. Please upload at least one image or one video when using audio reference.');
+    }
+    if (mode === 'text2video') {
+      if (hasMedia) throw httpError(400, 'text2video does not accept image, video, or audio references.');
+      if (!prompt) throw httpError(400, 'prompt is required for text2video.');
+      if (!TEXT2VIDEO_MODELS.has(model)) throw httpError(400, `model ${model} is not supported for text2video.`);
+    }
+    if (mode === 'image2video') {
+      if (imageCount !== 1 || hasVideos || hasAudio) throw httpError(400, 'image2video requires exactly 1 image and does not accept video or audio references.');
+      if (!IMAGE2VIDEO_MODELS.has(model)) throw httpError(400, `model ${model} is not supported for image2video.`);
+    }
+    if (mode === 'frames2video') {
+      if (imageCount !== 2 || hasVideos || hasAudio) throw httpError(400, 'frames2video requires exactly 2 images and does not accept video or audio references.');
+      if (!FRAMES2VIDEO_MODELS.has(model)) throw httpError(400, `model ${model} is not supported for frames2video.`);
+    }
+    if (mode === 'multiframe2video') {
+      if (imageCount < 2 || hasVideos || hasAudio) throw httpError(400, 'multiframe2video requires 2 to 20 images and does not accept video or audio references.');
+      if (modelProvided) throw httpError(400, 'multiframe2video does not support model_version. Remove model or choose another video mode.');
+      if (videoResolution) throw httpError(400, 'multiframe2video does not support video_resolution.');
+      if (ratioInput) throw httpError(400, 'multiframe2video does not support ratio.');
+      if (imageCount === 2) {
+        if (transitionPromptsRaw.length > 0 || transitionDurationsRaw.length > 0) {
+          throw httpError(400, 'For exactly 2 images, use prompt and optional duration only. transition_prompt and transition_duration are for 3+ images.');
+        }
+        if (!prompt) throw httpError(400, 'prompt is required for exactly 2 images in multiframe2video.');
+      } else if (durationRaw !== undefined) {
+        throw httpError(400, 'duration is only supported as shorthand for exactly 2 images in multiframe2video.');
+      }
+    }
+    if (mode === 'multimodal2video') {
+      if (!hasImages && !hasVideos) throw httpError(400, 'multimodal2video requires at least one image or one video reference.');
+      if (!MULTIMODAL_MODELS.has(model)) throw httpError(400, `model ${model} is not supported for multimodal2video.`);
+      if (imageCount > 9) throw httpError(400, 'multimodal2video supports up to 9 images.');
+      if (videoCount > 3) throw httpError(400, 'multimodal2video supports up to 3 videos.');
+      if (audioCount > 3) throw httpError(400, 'multimodal2video supports up to 3 audio files.');
+    }
+
+    if (mode === 'multimodal2video' && model.includes('seedance2.0')) {
+      const validationDetails = await validateSeedance2Inputs(orderedMedia);
+      if (validationDetails.length > 0) {
+        throw httpError(400, `Seedance 2.0 input validation failed: ${validationDetails.map(item => item.message).join('; ')}`);
+      }
+    }
+
+    if (mode === 'text2video' || mode === 'multimodal2video') {
+      const ratio = ratioInput || '16:9';
+      if (ratioInput && !VIDEO_RATIOS.has(ratioInput)) {
+        throw httpError(400, 'ratio must be one of 1:1, 3:4, 16:9, 4:3, 9:16, 21:9');
+      }
+      const duration = durationRaw === undefined ? 5 : parseIntegerField(durationRaw);
+      if (duration === null) throw httpError(400, 'duration must be an integer');
+      const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
+      if (duration < minDuration || duration > maxDuration) {
+        throw httpError(400, `duration for ${mode} with model ${model} must be between ${minDuration} and ${maxDuration} seconds`);
+      }
+      if (videoResolution) {
+        const allowed = getVideoResolutionValues(mode, model);
+        if (!allowed.has(videoResolution)) {
+          throw httpError(400, `video_resolution for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
+        }
+      }
+    }
+
+    if (mode === 'image2video' || mode === 'frames2video') {
+      if (ratioInput) throw httpError(400, `${mode} does not support ratio.`);
+      const duration = durationRaw === undefined ? 5 : parseIntegerField(durationRaw);
+      if (duration === null) throw httpError(400, 'duration must be an integer');
+      const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
+      if (duration < minDuration || duration > maxDuration) {
+        throw httpError(400, `duration for ${mode} with model ${model} must be between ${minDuration} and ${maxDuration} seconds`);
+      }
+      if (videoResolution) {
+        const allowed = getVideoResolutionValues(mode, model);
+        if (!allowed.has(videoResolution)) {
+          throw httpError(400, `video_resolution for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
+        }
+      }
+    }
+
+    if (mode === 'multiframe2video') {
+      if (imageCount === 2) {
+        const segmentDuration = durationRaw === undefined ? 3 : parseFloatField(durationRaw);
+        if (segmentDuration === null) throw httpError(400, 'duration must be a number');
+        if (segmentDuration < 0.5 || segmentDuration > 8) {
+          throw httpError(400, 'duration for multiframe2video must be between 0.5 and 8 seconds per segment');
+        }
+      } else {
+        const transitionCount = imageCount - 1;
+        const prompts = transitionPromptsRaw.length > 0 ? transitionPromptsRaw : (prompt ? Array.from({ length: transitionCount }, () => prompt) : []);
+        if (prompts.length !== transitionCount) {
+          throw httpError(400, `transition_prompt must contain exactly ${transitionCount} values for ${imageCount} images, or provide prompt shorthand.`);
+        }
+        const durations = transitionDurationsRaw.length > 0
+          ? transitionDurationsRaw.map(value => Number(value))
+          : Array.from({ length: transitionCount }, () => 3);
+        if (durations.length !== transitionCount) {
+          throw httpError(400, `transition_duration must contain exactly ${transitionCount} values for ${imageCount} images.`);
+        }
+        for (const segmentDuration of durations) {
+          if (!Number.isFinite(segmentDuration) || segmentDuration < 0.5 || segmentDuration > 8) {
+            throw httpError(400, 'each transition_duration must be between 0.5 and 8 seconds');
+          }
+        }
+        const totalDuration = durations.reduce((sum, value) => sum + value, 0);
+        if (totalDuration < 2) throw httpError(400, 'total duration for multiframe2video must be at least 2 seconds');
+      }
+    }
+
+    let command = '';
+    let dbModel: string | null = model;
+
+    if (mode === 'multimodal2video') {
+      const mediaArgs = orderedMedia.map(item => {
+        const mediaPath = getCliFilePath(item.file);
+        if (item.type === 'image') return `--image=${shellQuote(mediaPath)}`;
+        if (item.type === 'video') return `--video=${shellQuote(mediaPath)}`;
+        return `--audio=${shellQuote(mediaPath)}`;
+      }).join(' ');
+      const ratio = ratioInput || '16:9';
+      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
+      const promptParam = prompt ? ` --prompt=${shellQuote(prompt)}` : '';
+      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
+      command = `dreamina multimodal2video ${mediaArgs}${promptParam} --model_version=${model} --duration=${duration} --ratio=${ratio}${videoResolutionParam} ${sessionParam} --poll=0`;
+    } else if (mode === 'frames2video') {
+      const firstPath = getCliFilePath(imageMedia[0].file);
+      const lastPath = getCliFilePath(imageMedia[1].file);
+      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
+      const promptParam = prompt ? ` --prompt=${shellQuote(prompt)}` : '';
+      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
+      command = `dreamina frames2video --first=${shellQuote(firstPath)} --last=${shellQuote(lastPath)}${promptParam} --model_version=${model} --duration=${duration}${videoResolutionParam} ${sessionParam} --poll=0`;
+    } else if (mode === 'multiframe2video') {
+      const imagePathCsv = imageMedia.map(item => getCliFilePath(item.file)).join(',');
+      const imagePaths = `--images=${shellQuote(imagePathCsv)}`;
+      if (imageCount === 2) {
+        const duration = durationRaw === undefined ? 3 : parseFloatField(durationRaw);
+        command = `dreamina multiframe2video ${imagePaths} --prompt=${shellQuote(prompt || '')} --duration=${duration} ${sessionParam} --poll=0`;
+      } else {
+        const transitionCount = imageCount - 1;
+        const prompts = transitionPromptsRaw.length > 0 ? transitionPromptsRaw : Array.from({ length: transitionCount }, () => prompt || '');
+        const durations = transitionDurationsRaw.length > 0
+          ? transitionDurationsRaw.map(value => Number(value))
+          : Array.from({ length: transitionCount }, () => 3);
+        const transitionPromptArgs = prompts.map(value => `--transition-prompt=${shellQuote(value)}`).join(' ');
+        const transitionDurationArgs = durations.map(value => `--transition-duration=${value}`).join(' ');
+        command = `dreamina multiframe2video ${imagePaths} ${transitionPromptArgs} ${transitionDurationArgs} ${sessionParam} --poll=0`;
+      }
+      dbModel = null;
+    } else if (mode === 'image2video') {
+      const imagePath = getCliFilePath(imageMedia[0].file);
+      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
+      const promptParam = prompt ? ` --prompt=${shellQuote(prompt)}` : '';
+      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
+      command = `dreamina image2video --image=${shellQuote(imagePath)}${promptParam} --model_version=${model} --duration=${duration}${videoResolutionParam} ${sessionParam} --poll=0`;
+    } else {
+      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
+      const ratio = ratioInput || '16:9';
+      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
+      command = `dreamina text2video --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model} --duration=${duration}${videoResolutionParam} ${sessionParam} --poll=0`;
+    }
+
+    return await dispatchQueuedTask(req, {
+      command,
+      type: mode,
+      model: dbModel,
+      prompt: prompt || '',
+    });
+  } finally {
+    cleanupUploadedFiles(allFiles);
+  }
+};
+
 const apiKeyAuth = async (req: Request, res: Response, next: any) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: { message: 'Missing Authorization header' } });
@@ -663,484 +1541,94 @@ router.get('/models', apiKeyAuth, (_req: Request, res: Response) => {
   });
 });
 
-router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async (req: Request, res: Response) => {
-  let account: any = null;
+router.post('/responses', apiKeyAuth, responsesUpload.any(), async (req: Request, res: Response) => {
   try {
-    const files = (req.files as Express.Multer.File[] | undefined) || [];
-    const hasImages = files.length > 0;
-    const prompt = getFirstBodyValue(req.body.prompt);
-    const model = getFirstBodyValue(req.body.model) || '5.0';
-    const resolutionType = getFirstBodyValue(req.body.resolution_type);
-    const ratio = getFirstBodyValue(req.body.ratio) || '1:1';
-    let sessionParam = '';
-
-    try {
-      sessionParam = buildSessionParam(req.body.session);
-    } catch (err: any) {
-      cleanupUploadedFiles(files);
-      return res.status(400).json({ error: { message: err.message } });
-    }
-
-    const fail = (status: number, message: string) => {
-      cleanupUploadedFiles(files);
-      return res.status(status).json({ error: { message } });
-    };
-
-    if (!prompt && !hasImages) {
-      return fail(400, "Either 'prompt' or an 'image' file is required.");
-    }
-
-    if (!IMAGE_RATIOS.has(ratio)) {
-      return fail(400, 'ratio must be one of 21:9, 16:9, 3:2, 4:3, 1:1, 3:4, 2:3, 9:16');
-    }
-
-    if (hasImages) {
-      if (files.length > 10) {
-        return fail(400, 'images must not exceed 10 files');
-      }
-      if (!IMAGE2IMAGE_MODELS.has(model)) {
-        return fail(400, `model ${model} is not supported for image2image`);
-      }
-      if (resolutionType && !IMAGE2IMAGE_RESOLUTIONS.has(resolutionType)) {
-        return fail(400, 'resolution_type for image2image must be 2k or 4k');
-      }
-    } else {
-      const allowed = TEXT2IMAGE_RESOLUTIONS_BY_MODEL.get(model);
-      if (!allowed) {
-        return fail(400, `model ${model} is not supported for text2image`);
-      }
-      if (resolutionType && !allowed.has(resolutionType)) {
-        return fail(400, `resolution_type for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
-      }
-    }
-
-    account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
-    if (!account) {
-      cleanupUploadedFiles(files);
-      return res.status(503).json({ error: { message: 'All Dreamina accounts are busy or out of credits. Please try again later.' } });
-    }
-
-    let command = "";
-    let dbTaskType = "";
-    if (hasImages) {
-      const imagePathsCsv = files.map(f => `${process.cwd()}/${f.path}`).join(',');
-      const resParam = resolutionType ? ` --resolution_type=${resolutionType}` : '';
-      command = `dreamina image2image --images=${shellQuote(imagePathsCsv)} --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model}${resParam} ${sessionParam} --poll=0`;
-      dbTaskType = 'image2image';
-    } else {
-      const resParam = resolutionType ? ` --resolution_type=${resolutionType}` : '';
-      command = `dreamina text2image --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model}${resParam} ${sessionParam} --poll=0`;
-      dbTaskType = 'text2image';
-    }
-    
-    console.log(`[Jimeng Dispatcher] Executing: ${command}`);
-
-    let dbTask: any;
-    try {
-      dbTask = await prisma.task.create({
-        data: { apiKeyId: (req as any).apiUserId, accountId: account.id, type: dbTaskType, model: model, prompt: prompt || '' }
-      });
-    } catch (dbErr: any) {
-      await accountService.releaseAccount(account.id, 'IDLE');
-      cleanupUploadedFiles(files);
-      return res.status(500).json({ error: { message: 'DB error: ' + dbErr.message } });
-    }
-
-    let submitId = "";
-    try {
-      const { stdout } = await runJimengCommand(command, account.homeDir);
-      const info = extractSubmitInfo(stdout);
-      submitId = info.submitId;
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'PROCESSING', jimengSubmitId: submitId, jimengLogId: info.logId } });
-    } catch (cmdErr: any) {
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'FAILED', errorMsg: cmdErr.message } });
-      const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');
-      await accountService.releaseAccount(account.id, isNoVip ? 'NO_VIP' : 'ERROR');
-      cleanupUploadedFiles(files);
-      return res.status(500).json({ error: { message: "Jimeng CLI failed: " + cmdErr.message } });
-    }
-
-    await accountService.releaseAccount(account.id, 'IDLE');
-    cleanupUploadedFiles(files);
-
-    return res.json({ id: dbTask.id, status: "processing", submit_id: submitId });
-
-  } catch (err: any) {
-    if (account) {
-      try { await accountService.releaseAccount(account.id, 'IDLE'); } catch {}
-    }
-    cleanupUploadedFiles((req.files as Express.Multer.File[] | undefined) || []);
-    res.status(500).json({ error: { message: err.message }});
+    const result = await createResponsesDispatch(req);
+    return res.json(buildResponseObjectFromDispatch(result));
+  } catch (error: any) {
+    return res.status(getHttpStatus(error)).json({ error: { message: error.message } });
   }
 });
 
-router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: Request, res: Response) => {
-  let account: any = null;
-  const file = req.file as Express.Multer.File | undefined;
-
+router.get('/responses/:id', apiKeyAuth, async (req: Request, res: Response) => {
   try {
-    if (!file) {
-      return res.status(400).json({ error: { message: 'image file is required' } });
-    }
-
-    const resolutionType = getFirstBodyValue(req.body.resolution_type) || '2k';
-    if (!UPSCALE_RESOLUTIONS.has(resolutionType)) {
-      cleanupUploadedFile(file);
-      return res.status(400).json({ error: { message: 'resolution_type must be one of 2k, 4k, 8k' } });
-    }
-
-    let sessionParam = '';
-    try {
-      sessionParam = buildSessionParam(req.body.session);
-    } catch (err: any) {
-      cleanupUploadedFile(file);
-      return res.status(400).json({ error: { message: err.message } });
-    }
-
-    account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
-    if (!account) {
-      cleanupUploadedFile(file);
-      return res.status(503).json({ error: { message: 'All Dreamina accounts are busy or out of credits. Please try again later.' } });
-    }
-
-    const dbTask = await prisma.task.create({
-      data: {
-        apiKeyId: (req as any).apiUserId,
-        accountId: account.id,
-        type: 'image_upscale',
-        model: 'image_upscale',
-        prompt: `upscale:${resolutionType}`,
-      },
+    const rawId = String(req.params.id || '');
+    const taskId = rawId.startsWith('resp_') ? rawId.slice(5) : rawId;
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      include: { account: true, apiKey: true },
     });
 
-    let submitId = '';
-    try {
-      const imagePath = `${process.cwd()}/${file.path}`;
-      const command = `dreamina image_upscale --image=${shellQuote(imagePath)} --resolution_type=${resolutionType} ${sessionParam} --poll=0`;
-      console.log(`[Jimeng Dispatcher] Executing: ${command}`);
-      const { stdout } = await runJimengCommand(command, account.homeDir);
-      const info = extractSubmitInfo(stdout);
-      submitId = info.submitId;
-      await prisma.task.update({
-        where: { id: dbTask.id },
-        data: { status: 'PROCESSING', jimengSubmitId: submitId, jimengLogId: info.logId },
-      });
-    } catch (cmdErr: any) {
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'FAILED', errorMsg: cmdErr.message } });
-      const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');
-      await accountService.releaseAccount(account.id, isNoVip ? 'NO_VIP' : 'ERROR');
-      cleanupUploadedFile(file);
-      return res.status(500).json({ error: { message: 'Jimeng CLI failed: ' + cmdErr.message } });
+    if (!task || task.apiKeyId !== (req as any).apiUserId) {
+      return res.status(404).json({ error: { message: 'Response not found' } });
     }
 
-    await accountService.releaseAccount(account.id, 'IDLE');
-    cleanupUploadedFile(file);
+    return res.json(buildResponseObject(task));
+  } catch (error: any) {
+    return res.status(500).json({ error: { message: error.message } });
+  }
+});
 
-    return res.json({ id: dbTask.id, status: 'processing', submit_id: submitId });
+router.post('/videos', apiKeyAuth, upload.any(), async (req: Request, res: Response) => {
+  try {
+    const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
+    const body = normalizeOpenAIVideoBody(req.body || {});
+    const result = await dispatchVideoTask(req, body, filesMap);
+    return res.json(buildOpenAIVideoObjectFromDispatch(result));
   } catch (err: any) {
-    if (account) {
-      try { await accountService.releaseAccount(account.id, 'IDLE'); } catch {}
-    }
-    cleanupUploadedFile(file);
+    return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+  }
+});
+
+router.get('/videos/:id', apiKeyAuth, async (req: Request, res: Response) => {
+  try {
+    const task = await getVideoTaskByPublicId(req, String(req.params.id || ''));
+    if (!task) return res.status(404).json({ error: { message: 'Video not found' } });
+    return res.json(buildOpenAIVideoObject(task));
+  } catch (err: any) {
     return res.status(500).json({ error: { message: err.message } });
   }
 });
 
-router.post('/videos/generations', apiKeyAuth, upload.fields([{ name: 'image', maxCount: 20 }, { name: 'audio', maxCount: 3 }, { name: 'video', maxCount: 3 }]), async (req: Request, res: Response) => {
-  const allFiles: Express.Multer.File[] = [];
-  if (req.files) {
-    const fMap = req.files as { [fieldname: string]: Express.Multer.File[] };
-    if (fMap['image']) allFiles.push(...fMap['image']);
-    if (fMap['audio']) allFiles.push(...fMap['audio']);
-    if (fMap['video']) allFiles.push(...fMap['video']);
-  }
-
-  let account: any = null;
+router.get('/videos/:id/content', apiKeyAuth, async (req: Request, res: Response) => {
   try {
-    const prompt = getFirstBodyValue(req.body.prompt);
-    const rawModel = getFirstBodyValue(req.body.model);
-    const modelProvided = rawModel !== undefined;
-    const model = normalizeVideoModelVersion(rawModel || 'seedance2.0fast');
-    const requestedMode = normalizeVideoMode(req.body.mode ?? req.body.task_type ?? req.body.command ?? req.body.video_mode);
-    const durationRaw = getFirstBodyValue(req.body.duration);
-    const ratioInput = getFirstBodyValue(req.body.ratio);
-    const videoResolution = getFirstBodyValue(req.body.video_resolution);
-    const transitionPromptsRaw = parseBodyList((req.body as any).transition_prompt ?? (req.body as any).transition_prompts);
-    const transitionDurationsRaw = parseBodyList((req.body as any).transition_duration ?? (req.body as any).transition_durations);
-    let sessionParam = '';
-
-    try {
-      sessionParam = buildSessionParam(req.body.session);
-    } catch (err: any) {
-      cleanupUploadedFiles(allFiles);
-      return res.status(400).json({ error: { message: err.message } });
+    const task = await getVideoTaskByPublicId(req, String(req.params.id || ''));
+    if (!task) return res.status(404).json({ error: { message: 'Video not found' } });
+    if (task.status !== 'SUCCESS' || !task.resultUrl) {
+      return res.status(409).json({ error: { message: 'Video is not ready' } });
     }
-
-    const fail = (status: number, message: string, details?: ValidationDetail[]) => {
-      cleanupUploadedFiles(allFiles);
-      return res.status(status).json(details && details.length > 0 ? { error: { message, details } } : { error: { message } });
-    };
-
-    if (requestedMode === null) {
-      return fail(400, 'mode must be one of auto, text2video, image2video, frames2video, multiframe2video, multimodal2video');
-    }
-
-    const filesMap = (req.files as { [fieldname: string]: Express.Multer.File[] }) || {};
-    const referenceOrder = normalizeReferenceOrder(req.body.reference_order);
-    const orderedMedia = buildOrderedMedia(filesMap, referenceOrder);
-    const imageMedia = orderedMedia.filter(item => item.type === 'image');
-    const videoMedia = orderedMedia.filter(item => item.type === 'video');
-    const audioMedia = orderedMedia.filter(item => item.type === 'audio');
-    const hasImages = imageMedia.length > 0;
-    const hasVideos = videoMedia.length > 0;
-    const hasAudio = audioMedia.length > 0;
-    const hasMedia = orderedMedia.length > 0;
-    const imageCount = imageMedia.length;
-    const videoCount = videoMedia.length;
-    const audioCount = audioMedia.length;
-
-    const autoMode: VideoMode = !hasMedia
-      ? 'text2video'
-      : (hasVideos || hasAudio)
-        ? 'multimodal2video'
-        : imageCount === 1
-          ? 'image2video'
-          : imageCount === 2
-            ? (FRAMES2VIDEO_MODELS.has(model) ? 'frames2video' : 'multiframe2video')
-            : 'multiframe2video';
-    const mode: VideoMode = requestedMode === 'auto' ? autoMode : requestedMode;
-
-    if (referenceOrder.length > 0) {
-      console.log(`[Jimeng Dispatcher] reference_order received: ${JSON.stringify(referenceOrder)}`);
-    }
-
-    if (hasAudio && !hasImages && !hasVideos) {
-      return fail(400, 'Audio-only reference is not supported. Please upload at least one image or one video when using audio reference.');
-    }
-
-    if (mode === 'text2video') {
-      if (hasMedia) return fail(400, 'text2video does not accept image, video, or audio references.');
-      if (!prompt) return fail(400, 'prompt is required for text2video.');
-      if (!TEXT2VIDEO_MODELS.has(model)) return fail(400, `model ${model} is not supported for text2video.`);
-    }
-
-    if (mode === 'image2video') {
-      if (imageCount !== 1 || hasVideos || hasAudio) return fail(400, 'image2video requires exactly 1 image and does not accept video or audio references.');
-      if (!IMAGE2VIDEO_MODELS.has(model)) return fail(400, `model ${model} is not supported for image2video.`);
-    }
-
-    if (mode === 'frames2video') {
-      if (imageCount !== 2 || hasVideos || hasAudio) return fail(400, 'frames2video requires exactly 2 images and does not accept video or audio references.');
-      if (!FRAMES2VIDEO_MODELS.has(model)) return fail(400, `model ${model} is not supported for frames2video.`);
-    }
-
-    if (mode === 'multiframe2video') {
-      if (imageCount < 2 || hasVideos || hasAudio) return fail(400, 'multiframe2video requires 2 to 20 images and does not accept video or audio references.');
-      if (modelProvided) return fail(400, 'multiframe2video does not support model_version. Remove model or choose another video mode.');
-      if (videoResolution) return fail(400, 'multiframe2video does not support video_resolution.');
-      if (ratioInput) return fail(400, 'multiframe2video does not support ratio.');
-      if (imageCount === 2) {
-        if (transitionPromptsRaw.length > 0 || transitionDurationsRaw.length > 0) {
-          return fail(400, 'For exactly 2 images, use prompt and optional duration only. transition_prompt and transition_duration are for 3+ images.');
-        }
-        if (!prompt) return fail(400, 'prompt is required for exactly 2 images in multiframe2video.');
-      } else if (durationRaw !== undefined) {
-        return fail(400, 'duration is only supported as shorthand for exactly 2 images in multiframe2video.');
-      }
-    }
-
-    if (mode === 'multimodal2video') {
-      if (!hasImages && !hasVideos) return fail(400, 'multimodal2video requires at least one image or one video reference.');
-      if (!MULTIMODAL_MODELS.has(model)) return fail(400, `model ${model} is not supported for multimodal2video.`);
-      if (imageCount > 9) return fail(400, 'multimodal2video supports up to 9 images.');
-      if (videoCount > 3) return fail(400, 'multimodal2video supports up to 3 videos.');
-      if (audioCount > 3) return fail(400, 'multimodal2video supports up to 3 audio files.');
-    }
-
-    if (mode === 'multimodal2video' && model.includes('seedance2.0')) {
-      const validationDetails = await validateSeedance2Inputs(orderedMedia);
-      if (validationDetails.length > 0) {
-        return fail(400, 'Seedance 2.0 输入校验失败', validationDetails);
-      }
-    }
-
-    if (mode === 'text2video' || mode === 'multimodal2video') {
-      const ratio = ratioInput || '16:9';
-      if (ratioInput && !VIDEO_RATIOS.has(ratioInput)) {
-        return fail(400, 'ratio must be one of 1:1, 3:4, 16:9, 4:3, 9:16, 21:9');
-      }
-      const duration = durationRaw === undefined ? 5 : parseIntegerField(durationRaw);
-      if (duration === null) return fail(400, 'duration must be an integer');
-      const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
-      if (duration < minDuration || duration > maxDuration) {
-        return fail(400, `duration for ${mode} with model ${model} must be between ${minDuration} and ${maxDuration} seconds`);
-      }
-      if (videoResolution) {
-        const allowed = getVideoResolutionValues(mode, model);
-        if (!allowed.has(videoResolution)) {
-          return fail(400, `video_resolution for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
-        }
-      }
-    }
-
-    if (mode === 'image2video' || mode === 'frames2video') {
-      if (ratioInput) return fail(400, `${mode} does not support ratio.`);
-      const duration = durationRaw === undefined ? 5 : parseIntegerField(durationRaw);
-      if (duration === null) return fail(400, 'duration must be an integer');
-      const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
-      if (duration < minDuration || duration > maxDuration) {
-        return fail(400, `duration for ${mode} with model ${model} must be between ${minDuration} and ${maxDuration} seconds`);
-      }
-      if (videoResolution) {
-        const allowed = getVideoResolutionValues(mode, model);
-        if (!allowed.has(videoResolution)) {
-          return fail(400, `video_resolution for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
-        }
-      }
-    }
-
-    if (mode === 'multiframe2video') {
-      if (imageCount === 2) {
-        const segmentDuration = durationRaw === undefined ? 3 : parseFloatField(durationRaw);
-        if (segmentDuration === null) return fail(400, 'duration must be a number');
-        if (segmentDuration < 0.5 || segmentDuration > 8) {
-          return fail(400, 'duration for multiframe2video must be between 0.5 and 8 seconds per segment');
-        }
-      } else {
-        const transitionCount = imageCount - 1;
-        const prompts = transitionPromptsRaw.length > 0 ? transitionPromptsRaw : (prompt ? Array.from({ length: transitionCount }, () => prompt) : []);
-        if (prompts.length !== transitionCount) {
-          return fail(400, `transition_prompt must contain exactly ${transitionCount} values for ${imageCount} images, or provide prompt shorthand.`);
-        }
-        const durations = transitionDurationsRaw.length > 0
-          ? transitionDurationsRaw.map(value => Number(value))
-          : Array.from({ length: transitionCount }, () => 3);
-        if (durations.length !== transitionCount) {
-          return fail(400, `transition_duration must contain exactly ${transitionCount} values for ${imageCount} images.`);
-        }
-        for (const segmentDuration of durations) {
-          if (!Number.isFinite(segmentDuration) || segmentDuration < 0.5 || segmentDuration > 8) {
-            return fail(400, 'each transition_duration must be between 0.5 and 8 seconds');
-          }
-        }
-        const totalDuration = durations.reduce((sum, value) => sum + value, 0);
-        if (totalDuration < 2) {
-          return fail(400, 'total duration for multiframe2video must be at least 2 seconds');
-        }
-      }
-    }
-
-    account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
-    if (!account) {
-      cleanupUploadedFiles(allFiles);
-      return res.status(503).json({ error: { message: 'All Dreamina accounts busy' } });
-    }
-
-    let command = "";
-    let dbTaskType = "";
-    let dbModel: string | null = model;
-    const dbPrompt = prompt || '';
-
-    if (mode === 'multimodal2video') {
-      const mediaArgs = orderedMedia
-        .map(item => {
-          const mediaPath = `${process.cwd()}/${item.file.path}`;
-          if (item.type === 'image') return `--image=${shellQuote(mediaPath)}`;
-          if (item.type === 'video') return `--video=${shellQuote(mediaPath)}`;
-          return `--audio=${shellQuote(mediaPath)}`;
-        })
-        .join(' ');
-      const ratio = ratioInput || '16:9';
-      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
-      const promptParam = prompt ? ` --prompt=${shellQuote(prompt)}` : '';
-      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
-      command = `dreamina multimodal2video ${mediaArgs}${promptParam} --model_version=${model} --duration=${duration} --ratio=${ratio}${videoResolutionParam} ${sessionParam} --poll=0`;
-      dbTaskType = 'multimodal2video';
-    } else if (mode === 'frames2video') {
-      const firstImage = imageMedia[0].file;
-      const lastImage = imageMedia[1].file;
-      const firstPath = `${process.cwd()}/${firstImage.path}`;
-      const lastPath = `${process.cwd()}/${lastImage.path}`;
-      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
-      const promptParam = prompt ? ` --prompt=${shellQuote(prompt)}` : '';
-      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
-      command = `dreamina frames2video --first=${shellQuote(firstPath)} --last=${shellQuote(lastPath)}${promptParam} --model_version=${model} --duration=${duration}${videoResolutionParam} ${sessionParam} --poll=0`;
-      dbTaskType = 'frames2video';
-    } else if (mode === 'multiframe2video') {
-      const imagePathCsv = imageMedia.map(item => `${process.cwd()}/${item.file.path}`).join(',');
-      const imagePaths = `--images=${shellQuote(imagePathCsv)}`;
-      if (imageCount === 2) {
-        const duration = durationRaw === undefined ? 3 : parseFloatField(durationRaw);
-        command = `dreamina multiframe2video ${imagePaths} --prompt=${shellQuote(prompt || '')} --duration=${duration} ${sessionParam} --poll=0`;
-      } else {
-        const transitionCount = imageCount - 1;
-        const prompts = transitionPromptsRaw.length > 0 ? transitionPromptsRaw : Array.from({ length: transitionCount }, () => prompt || '');
-        const durations = transitionDurationsRaw.length > 0
-          ? transitionDurationsRaw.map(value => Number(value))
-          : Array.from({ length: transitionCount }, () => 3);
-        const transitionPromptArgs = prompts.map(value => `--transition-prompt=${shellQuote(value)}`).join(' ');
-        const transitionDurationArgs = durations.map(value => `--transition-duration=${value}`).join(' ');
-        command = `dreamina multiframe2video ${imagePaths} ${transitionPromptArgs} ${transitionDurationArgs} ${sessionParam} --poll=0`;
-      }
-      dbTaskType = 'multiframe2video';
-      dbModel = null;
-    } else if (mode === 'image2video') {
-      const firstImage = imageMedia[0].file;
-      const imagePath = `${process.cwd()}/${firstImage.path}`;
-      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
-      const promptParam = prompt ? ` --prompt=${shellQuote(prompt)}` : '';
-      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
-      command = `dreamina image2video --image=${shellQuote(imagePath)}${promptParam} --model_version=${model} --duration=${duration}${videoResolutionParam} ${sessionParam} --poll=0`;
-      dbTaskType = 'image2video';
-    } else {
-      const duration = durationRaw === undefined ? 5 : Number(durationRaw);
-      const ratio = ratioInput || '16:9';
-      const videoResolutionParam = videoResolution ? ` --video_resolution=${videoResolution}` : '';
-      command = `dreamina text2video --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model} --duration=${duration}${videoResolutionParam} ${sessionParam} --poll=0`;
-      dbTaskType = 'text2video';
-    }
-    
-    console.log(`[Jimeng Dispatcher] Executing: ${command}`);
-
-    let dbTask: any;
-    try {
-      dbTask = await prisma.task.create({
-        data: { apiKeyId: (req as any).apiUserId, accountId: account.id, type: dbTaskType, model: dbModel, prompt: dbPrompt }
-      });
-    } catch (dbErr: any) {
-      await accountService.releaseAccount(account.id, 'IDLE');
-      cleanupUploadedFiles(allFiles);
-      return res.status(500).json({ error: { message: 'DB error: ' + dbErr.message } });
-    }
-
-    let submitId = "";
-    try {
-      const { stdout } = await runJimengCommand(command, account.homeDir);
-      const info = extractSubmitInfo(stdout);
-      submitId = info.submitId;
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'PROCESSING', jimengSubmitId: submitId, jimengLogId: info.logId } });
-    } catch (cmdErr: any) {
-      await prisma.task.update({ where: { id: dbTask.id }, data: { status: 'FAILED', errorMsg: cmdErr.message } });
-      const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');
-      await accountService.releaseAccount(account.id, isNoVip ? 'NO_VIP' : 'ERROR');
-      cleanupUploadedFiles(allFiles);
-      return res.status(500).json({ error: { message: "Jimeng CLI failed: " + cmdErr.message } });
-    }
-
-    await accountService.releaseAccount(account.id, 'IDLE');
-    cleanupUploadedFiles(allFiles);
-
-    return res.json({ id: dbTask.id, status: "processing", submit_id: submitId });
-
+    return res.redirect(task.resultUrl);
   } catch (err: any) {
-    if (account) {
-      try { await accountService.releaseAccount(account.id, 'IDLE'); } catch {}
-    }
-    cleanupUploadedFiles(allFiles);
-    res.status(500).json({ error: { message: err.message }});
+    return res.status(500).json({ error: { message: err.message } });
   }
 });
 
+router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async (req: Request, res: Response) => {
+  try {
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    const result = await dispatchImageTask(req, req.body, files);
+    return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+  } catch (err: any) {
+    return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+  }
+});
+router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: Request, res: Response) => {
+  try {
+    const result = await dispatchUpscaleTask(req, req.body, req.file as Express.Multer.File | undefined);
+    return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+  } catch (err: any) {
+    return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+  }
+});
+router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request, res: Response) => {
+  try {
+    const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
+    const result = await dispatchVideoTask(req, req.body, filesMap);
+    return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+  } catch (err: any) {
+    return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+  }
+});
 router.get('/tasks/:id', apiKeyAuth, async (req: Request, res: Response) => {
   try {
     const taskId = req.params.id as string;
@@ -1159,9 +1647,9 @@ router.get('/tasks/:id', apiKeyAuth, async (req: Request, res: Response) => {
     if (task.status === "FAILED") {
       return res.json({ id: task.id, status: "failed", error: task.errorMsg || "Generation failed" });
     }
-    
+
     // If it's PENDING or PROCESSING, just return processing. The daemon handles the CLI.
-    // 如果有 pollErrorMsg，告知调用者我方网络异常（任务仍在火山排队，不代表失败）
+    // Surface polling warnings without marking the queued Dreamina task as failed.
     const response: any = { id: task.id, status: "processing" };
     if ((task as any).pollErrorMsg) {
       response.poll_warning = (task as any).pollErrorMsg;
