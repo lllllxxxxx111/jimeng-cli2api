@@ -11,6 +11,7 @@ const crypto_1 = require("crypto");
 const fs_1 = __importDefault(require("fs"));
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const adminAuth_1 = require("../middleware/adminAuth");
+const adminStats_1 = require("../services/adminStats");
 const router = (0, express_1.Router)();
 router.post('/sys/login', async (req, res) => {
     const { password } = req.body;
@@ -45,6 +46,15 @@ router.post('/sys/password', adminAuth_1.adminAuth, async (req, res) => {
 router.get('/sys/check', adminAuth_1.adminAuth, (req, res) => res.json({ ok: true }));
 // Apply middleware to subsequent routes
 router.use(adminAuth_1.adminAuth);
+router.get('/stats', async (_req, res) => {
+    try {
+        const stats = await (0, adminStats_1.collectAdminStats)();
+        res.json(stats);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 const prisma = new client_1.PrismaClient();
 const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
 function saveOAuthContext(accountHomeDir, ctx) {
@@ -390,12 +400,20 @@ router.delete('/apikeys/:id', async (req, res) => {
 // 查询任务列表（支持 status/apiKeyId/accountId 过滤，分页）
 router.get('/tasks', async (req, res) => {
     try {
-        const { status, accountId, page = '1', limit = '20' } = req.query;
+        const { status, accountId, prompt, error, type, model, page = '1', limit = '20' } = req.query;
         const where = {};
         if (status)
             where.status = status;
         if (accountId)
             where.accountId = accountId;
+        if (prompt)
+            where.prompt = { contains: prompt };
+        if (error)
+            where.OR = [{ errorMsg: { contains: error } }, { pollErrorMsg: { contains: error } }];
+        if (type)
+            where.type = type;
+        if (model)
+            where.model = model;
         const pageNum = Math.max(1, parseInt(page));
         const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
         const skip = (pageNum - 1) * limitNum;

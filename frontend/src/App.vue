@@ -12,6 +12,9 @@ const pwdError = ref('');
 
 const accounts = ref<any[]>([]);
 const apikeys = ref<any[]>([]);
+const stats = ref<any | null>(null);
+const statsLoading = ref(false);
+const statsError = ref('');
 const loading = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
@@ -36,6 +39,9 @@ const taskTotal = ref(0);
 const taskPage = ref(1);
 const taskLimit = 20;
 const taskFilterStatus = ref('');
+const taskFilterPrompt = ref('');
+const taskFilterError = ref('');
+const taskFilterAccountId = ref('');
 const taskLoading = ref(false);
 const taskDetail = ref<any>(null);
 const failReason = ref('');
@@ -141,6 +147,31 @@ const authFetch = async (url: string, options: any = {}) => {
     throw new Error("登录已过期，请重新登录");
   }
   return res;
+};
+
+const formatBytes = (value: number) => {
+  if (!Number.isFinite(value)) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+};
+
+const formatRate = (value: number) => `${((Number(value) || 0) * 100).toFixed(1)}%`;
+const maxCount = (items: Array<{ count: number }> = []) => Math.max(1, ...items.map((item) => item.count || 0));
+const barWidth = (count: number, max: number) => `${Math.max(4, Math.round((count / Math.max(max, 1)) * 100))}%`;
+const shortText = (value: string, max = 90) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length <= max ? text : `${text.slice(0, max - 1)}...`;
+};
+
+const getAccountMetrics = (accountId: string) => {
+  const row = stats.value?.accounts?.accounts?.find((item: any) => item.id === accountId);
+  return row || { totalCreatives: 0, todayCreatives: 0, processingTasks: 0, todaySuccess: 0, failedTasks: 0, todayFailed: 0 };
 };
 
 const fetchAccounts = async () => {
@@ -294,6 +325,24 @@ const fetchApiKeys = async () => {
   }
 };
 
+const fetchStats = async () => {
+  statsLoading.value = true;
+  statsError.value = '';
+  try {
+    const res = await authFetch('/admin/stats');
+    const data = await res.json();
+    if (res.ok) {
+      stats.value = data;
+    } else {
+      statsError.value = data.error || '加载运行概览失败';
+    }
+  } catch (error: any) {
+    statsError.value = error.message || '加载运行概览失败';
+  } finally {
+    statsLoading.value = false;
+  }
+};
+
 const generateApiKey = async () => {
   if (!apiKeyOwner.value) return alert('请输入拥有者标识');
   errorMessage.value = '';
@@ -407,6 +456,9 @@ const fetchTasks = async (page = taskPage.value) => {
   try {
     const params = new URLSearchParams({ page: String(page), limit: String(taskLimit) });
     if (taskFilterStatus.value) params.set('status', taskFilterStatus.value);
+    if (taskFilterPrompt.value) params.set('prompt', taskFilterPrompt.value);
+    if (taskFilterError.value) params.set('error', taskFilterError.value);
+    if (taskFilterAccountId.value) params.set('accountId', taskFilterAccountId.value);
     const res = await authFetch(`/admin/tasks?${params}`);
     const data = await res.json();
     tasks.value = data.tasks || [];
@@ -417,6 +469,50 @@ const fetchTasks = async (page = taskPage.value) => {
   } finally {
     taskLoading.value = false;
   }
+};
+
+const clearTaskFilters = () => {
+  taskFilterStatus.value = '';
+  taskFilterPrompt.value = '';
+  taskFilterError.value = '';
+  taskFilterAccountId.value = '';
+};
+
+const inspectFailurePrompt = (item: any) => {
+  currentTab.value = 'tasks';
+  taskFilterStatus.value = 'FAILED';
+  taskFilterPrompt.value = item.prompt || '';
+  taskFilterError.value = '';
+  taskFilterAccountId.value = '';
+  fetchTasks(1);
+};
+
+const inspectFailureReason = (item: any) => {
+  currentTab.value = 'tasks';
+  taskFilterStatus.value = 'FAILED';
+  taskFilterPrompt.value = '';
+  taskFilterError.value = item.reason || '';
+  taskFilterAccountId.value = '';
+  fetchTasks(1);
+};
+
+const inspectAccountTasks = (accountId: string) => {
+  currentTab.value = 'tasks';
+  taskFilterAccountId.value = accountId;
+  taskFilterStatus.value = '';
+  taskFilterPrompt.value = '';
+  taskFilterError.value = '';
+  fetchTasks(1);
+};
+
+const inspectFailedTask = (task: any) => {
+  currentTab.value = 'tasks';
+  taskFilterStatus.value = 'FAILED';
+  taskFilterPrompt.value = task.prompt || '';
+  taskFilterError.value = '';
+  taskFilterAccountId.value = task.account?.id || '';
+  taskDetail.value = task;
+  fetchTasks(1);
 };
 
 const forceFailTask = async (id: string) => {
@@ -478,6 +574,7 @@ const initData = () => {
     .then(() => {
       fetchAccounts();
       fetchApiKeys();
+      fetchStats();
     })
     .catch(() => {});
 };
@@ -505,6 +602,7 @@ onMounted(() => {
       <nav class="flex-1 space-y-2">
         <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">内部账号池</button>
         <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 令牌分发</button>
+        <button @click="currentTab = 'monitor'; fetchStats()" :class="currentTab === 'monitor' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">运行监控</button>
         <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">任务管理</button>
         <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold">API 集成文档</button>
         <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-300 hover:bg-slate-800'" class="w-full text-left px-5 py-3 rounded-xl font-semibold mt-4">管理员安全</button>
@@ -583,6 +681,206 @@ onMounted(() => {
         <button @click="successMessage = ''" class="text-emerald-400 hover:text-emerald-600 font-bold text-lg ml-4">×</button>
       </div>
 
+      <!-- ========== TAB: MONITOR ========== -->
+      <div v-if="currentTab === 'monitor'" class="space-y-6">
+        <div class="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h2 class="text-3xl font-black text-slate-800">运行监控</h2>
+            <p class="text-sm text-slate-500 mt-1">账号轮询、任务产量、失败提示词和运行资源概览</p>
+          </div>
+          <button @click="fetchStats" :disabled="statsLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">刷新数据</button>
+        </div>
+
+        <div v-if="statsError" class="bg-red-50 border border-red-200 text-red-700 px-5 py-4 rounded-xl text-sm font-medium">{{ statsError }}</div>
+        <div v-if="statsLoading && !stats" class="text-center py-20 text-slate-400 bg-white rounded-2xl border border-slate-200">运行数据加载中...</div>
+
+        <template v-if="stats">
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p class="text-xs font-bold text-slate-400 uppercase">账号池</p>
+              <p class="text-3xl font-black text-slate-800 mt-2">{{ stats.accounts.total }}</p>
+              <p class="text-xs text-slate-500 mt-1">可用 {{ stats.accounts.idle }} · 忙碌 {{ stats.accounts.busy }} · 异常 {{ stats.accounts.error }}</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p class="text-xs font-bold text-slate-400 uppercase">任务总数</p>
+              <p class="text-3xl font-black text-slate-800 mt-2">{{ stats.tasks.total }}</p>
+              <p class="text-xs text-slate-500 mt-1">处理中 {{ stats.tasks.processing }} · 待处理 {{ stats.tasks.pending }}</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p class="text-xs font-bold text-slate-400 uppercase">今日创意</p>
+              <p class="text-3xl font-black text-emerald-600 mt-2">{{ stats.tasks.today.success }}</p>
+              <p class="text-xs text-slate-500 mt-1">今日提交 {{ stats.tasks.today.total }} · 失败 {{ stats.tasks.today.failed }}</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p class="text-xs font-bold text-slate-400 uppercase">失败率</p>
+              <p class="text-3xl font-black text-red-500 mt-2">{{ formatRate(stats.failures.rate) }}</p>
+              <p class="text-xs text-slate-500 mt-1">今日 {{ formatRate(stats.failures.todayRate) }} · 累计失败 {{ stats.failures.total }}</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p class="text-xs font-bold text-slate-400 uppercase">内存占用</p>
+              <p class="text-3xl font-black text-slate-800 mt-2">{{ formatBytes(stats.runtime.memory.rss) }}</p>
+              <p class="text-xs text-slate-500 mt-1">系统已用 {{ formatRate(stats.runtime.systemMemory.usedPercent / 100) }}</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+              <h3 class="font-black text-slate-800">运行实例</h3>
+              <div class="space-y-3 text-sm">
+                <div class="flex justify-between gap-4"><span class="text-slate-400">PID</span><span class="font-mono text-slate-700">{{ stats.runtime.pid }}</span></div>
+                <div class="flex justify-between gap-4"><span class="text-slate-400">运行时长</span><span class="font-mono text-slate-700">{{ Math.floor(stats.runtime.uptimeSeconds / 60) }} 分钟</span></div>
+                <div class="flex justify-between gap-4"><span class="text-slate-400">Node</span><span class="font-mono text-slate-700">{{ stats.runtime.nodeVersion }}</span></div>
+                <div class="flex justify-between gap-4"><span class="text-slate-400">平台</span><span class="font-mono text-slate-700">{{ stats.runtime.platform }} · {{ stats.runtime.cpuCount }} CPU</span></div>
+                <div class="pt-2 border-t border-slate-100">
+                  <p class="text-xs font-bold text-slate-400 mb-1">CLI 路径</p>
+                  <p class="text-xs font-mono text-slate-600 break-all">{{ stats.runtime.cliBin }}</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 xl:col-span-2">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="font-black text-slate-800">近 7 天运行走势</h3>
+                <span class="text-xs text-slate-400">成功 / 失败 / 处理中</span>
+              </div>
+              <div class="space-y-3">
+                <div v-for="day in stats.failures.timeline" :key="day.dateKey" class="grid grid-cols-[56px_1fr_80px] gap-3 items-center text-xs">
+                  <span class="font-semibold text-slate-500">{{ day.label }}</span>
+                  <div class="h-8 bg-slate-100 rounded-lg overflow-hidden flex">
+                    <div v-if="day.success" class="bg-emerald-400" :style="{ width: barWidth(day.success, Math.max(day.total, 1)) }"></div>
+                    <div v-if="day.failed" class="bg-red-400" :style="{ width: barWidth(day.failed, Math.max(day.total, 1)) }"></div>
+                    <div v-if="day.processing || day.pending" class="bg-blue-400" :style="{ width: barWidth(day.processing + day.pending, Math.max(day.total, 1)) }"></div>
+                  </div>
+                  <span class="text-right text-slate-500">{{ day.total }} 条</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-black text-slate-800">账号运行矩阵</h3>
+              <span class="text-xs text-slate-400">点击任务可进入筛选后的任务管理</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">账号</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">状态</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">积分</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">今日创意</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">处理中</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">失败</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                  <tr v-if="stats.accounts.accounts.length === 0"><td colspan="7" class="text-center py-10 text-slate-400">暂无账号数据</td></tr>
+                  <tr v-for="row in stats.accounts.accounts" :key="row.id" class="hover:bg-slate-50">
+                    <td class="px-4 py-3">
+                      <p class="font-semibold text-slate-800">{{ row.name }}</p>
+                      <p class="text-xs text-slate-400 font-mono">{{ row.id }}</p>
+                    </td>
+                    <td class="px-4 py-3"><span class="text-xs font-bold px-2 py-1 rounded-full" :class="row.status === 'IDLE' ? 'bg-green-100 text-green-700' : row.status === 'BUSY' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'">{{ row.status }}</span></td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ row.creditBalance ?? '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ row.todaySuccess }} / {{ row.todayCreatives }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ row.processingTasks }}</td>
+                    <td class="px-4 py-3 text-xs text-red-500">{{ row.failedTasks }} <span class="text-slate-400">今日 {{ row.todayFailed }}</span></td>
+                    <td class="px-4 py-3"><button @click="inspectAccountTasks(row.id)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">查看任务</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+              <h3 class="font-black text-slate-800">高频失败提示词</h3>
+              <div v-if="stats.failures.byPrompt.length === 0" class="text-sm text-slate-400 py-6">暂无失败提示词</div>
+              <div v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" class="border border-slate-100 rounded-xl p-4">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="text-sm font-semibold text-slate-800 break-words">{{ item.promptPreview }}</p>
+                    <p class="text-xs text-slate-400 mt-1">{{ item.type }} · {{ item.model || '-' }} · 最近 {{ item.lastFailedAt ? new Date(item.lastFailedAt).toLocaleString() : '-' }}</p>
+                    <p v-if="item.sampleError" class="text-xs text-red-500 mt-2 break-words">{{ shortText(item.sampleError, 110) }}</p>
+                  </div>
+                  <button @click="inspectFailurePrompt(item)" class="text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg shrink-0">{{ item.count }} 次</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
+              <div>
+                <h3 class="font-black text-slate-800 mb-4">失败原因排行</h3>
+                <div v-if="stats.failures.byReason.length === 0" class="text-sm text-slate-400 py-6">暂无失败原因</div>
+                <div v-for="item in stats.failures.byReason" :key="item.reason" class="mb-3">
+                  <div class="flex justify-between text-xs mb-1 gap-3">
+                    <button @click="inspectFailureReason(item)" class="text-left text-slate-700 hover:text-indigo-600 font-semibold truncate">{{ item.reasonPreview }}</button>
+                    <span class="text-red-500 font-bold">{{ item.count }}</span>
+                  </div>
+                  <div class="h-2 rounded-full bg-slate-100 overflow-hidden"><div class="h-full bg-red-400" :style="{ width: barWidth(item.count, maxCount(stats.failures.byReason)) }"></div></div>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-5 pt-4 border-t border-slate-100">
+                <div>
+                  <h4 class="text-sm font-black text-slate-700 mb-3">失败模型</h4>
+                  <div v-for="item in stats.failures.byModel" :key="item.model" class="flex justify-between text-xs py-1.5 border-b border-slate-50">
+                    <span class="font-mono text-slate-600">{{ item.model }}</span>
+                    <span class="font-bold text-red-500">{{ item.count }}</span>
+                  </div>
+                </div>
+                <div>
+                  <h4 class="text-sm font-black text-slate-700 mb-3">失败账号</h4>
+                  <div v-for="item in stats.failures.byAccount" :key="item.id" class="flex justify-between text-xs py-1.5 border-b border-slate-50">
+                    <button @click="inspectAccountTasks(item.id)" class="text-slate-600 hover:text-indigo-600">{{ item.name }}</button>
+                    <span class="font-bold text-red-500">{{ item.count }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-black text-slate-800">最近失败任务</h3>
+              <button @click="currentTab = 'tasks'; taskFilterStatus = 'FAILED'; fetchTasks(1)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">查看全部失败</button>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">提示词</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">模型</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">账号</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">失败原因</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">时间</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                  <tr v-if="stats.failures.recent.length === 0"><td colspan="6" class="text-center py-10 text-slate-400">暂无失败任务</td></tr>
+                  <tr v-for="task in stats.failures.recent" :key="task.id" class="hover:bg-slate-50">
+                    <td class="px-4 py-3 text-xs text-slate-700 max-w-md break-words">{{ shortText(task.prompt, 110) || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-red-500 max-w-sm break-words">{{ shortText(task.errorMsg || task.pollErrorMsg, 100) || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-400">{{ new Date(task.updatedAt).toLocaleString() }}</td>
+                    <td class="px-4 py-3">
+                      <div class="flex gap-2">
+                        <button @click="openTaskDetail(task)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">详情</button>
+                        <button @click="inspectFailedTask(task)" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg">定位</button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </template>
+      </div>
+
       <!-- ========== TAB: ACCOUNTS ========== -->
       <div v-if="currentTab === 'accounts'" class="space-y-6">
         <div class="flex items-center justify-between">
@@ -603,8 +901,17 @@ onMounted(() => {
               </div>
               <p class="text-xs text-slate-400 font-mono">ID: {{ acc.id }}</p>
               <div v-if="acc.creditBalance" class="mt-1 text-sm text-slate-500">余额: <span class="font-bold text-emerald-600">{{ acc.creditBalance }}</span> 积分 · 最后检查: {{ acc.lastChecked ? new Date(acc.lastChecked).toLocaleString() : '从未' }}</div>
+              <div class="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                <span class="bg-slate-100 px-2 py-1 rounded-lg">总任务 {{ getAccountMetrics(acc.id).totalCreatives }}</span>
+                <span class="bg-emerald-50 text-emerald-700 px-2 py-1 rounded-lg">今日成功 {{ getAccountMetrics(acc.id).todaySuccess }}</span>
+                <span class="bg-blue-50 text-blue-700 px-2 py-1 rounded-lg">处理中 {{ getAccountMetrics(acc.id).processingTasks }}</span>
+                <span class="bg-red-50 text-red-600 px-2 py-1 rounded-lg">失败 {{ getAccountMetrics(acc.id).failedTasks }}</span>
+              </div>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">
+              <button @click="inspectAccountTasks(acc.id)" class="text-sm font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
+                任务
+              </button>
               <button @click="checkAccount(acc.id)" :disabled="checkingId === acc.id" class="text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ checkingId === acc.id ? '⏳' : '🔍' }} 检测状态
               </button>
@@ -899,7 +1206,7 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
       <div v-if="currentTab === 'tasks'" class="space-y-6">
         <div class="flex items-center justify-between flex-wrap gap-4">
           <h2 class="text-3xl font-black text-slate-800">任务管理</h2>
-          <div class="flex items-center gap-3">
+          <div class="flex items-center gap-3 flex-wrap">
             <select v-model="taskFilterStatus" @change="fetchTasks(1)" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
               <option value="">全部状态</option>
               <option value="PENDING">PENDING</option>
@@ -907,8 +1214,36 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
               <option value="SUCCESS">SUCCESS</option>
               <option value="FAILED">FAILED</option>
             </select>
+            <select v-model="taskFilterAccountId" @change="fetchTasks(1)" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
+              <option value="">全部账号</option>
+              <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option>
+            </select>
+            <input v-model="taskFilterPrompt" @keyup.enter="fetchTasks(1)" placeholder="搜索提示词" class="w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
+            <input v-model="taskFilterError" @keyup.enter="fetchTasks(1)" placeholder="搜索失败原因" class="w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
+            <button @click="fetchTasks(1)" :disabled="taskLoading" class="bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">筛选</button>
+            <button @click="clearTaskFilters(); fetchTasks(1)" class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 px-5 py-2.5 rounded-lg font-bold text-sm">清空</button>
             <button @click="fetchTasks(taskPage)" :disabled="taskLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">🔄 刷新</button>
           </div>
+        </div>
+
+        <div v-if="stats?.failures?.byPrompt?.length" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-black text-slate-800">失败提示词快捷筛选</h3>
+            <button @click="fetchStats" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">更新统计</button>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" @click="inspectFailurePrompt(item)" class="text-xs text-left bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 rounded-lg px-3 py-2 max-w-sm">
+              <span class="font-bold">{{ item.count }} 次</span>
+              <span class="ml-2">{{ item.promptPreview }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="taskFilterStatus || taskFilterAccountId || taskFilterPrompt || taskFilterError" class="flex flex-wrap gap-2 text-xs">
+          <span v-if="taskFilterStatus" class="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full">状态：{{ taskFilterStatus }}</span>
+          <span v-if="taskFilterAccountId" class="bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-full">账号：{{ accounts.find((acc: any) => acc.id === taskFilterAccountId)?.name || taskFilterAccountId }}</span>
+          <span v-if="taskFilterPrompt" class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-full">提示词：{{ shortText(taskFilterPrompt, 42) }}</span>
+          <span v-if="taskFilterError" class="bg-red-50 text-red-700 px-3 py-1.5 rounded-full">失败原因：{{ shortText(taskFilterError, 42) }}</span>
         </div>
 
         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -919,13 +1254,14 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">类型</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">模型</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">账号</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">提示词 / 错误</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">提交时间</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
-              <tr v-if="taskLoading"><td colspan="6" class="text-center py-12 text-slate-400">加载中...</td></tr>
-              <tr v-else-if="tasks.length === 0"><td colspan="6" class="text-center py-12 text-slate-400">暂无任务</td></tr>
+              <tr v-if="taskLoading"><td colspan="7" class="text-center py-12 text-slate-400">加载中...</td></tr>
+              <tr v-else-if="tasks.length === 0"><td colspan="7" class="text-center py-12 text-slate-400">暂无任务</td></tr>
               <tr v-for="task in tasks" :key="task.id" class="hover:bg-slate-50 transition">
                 <td class="px-4 py-3">
                   <span class="text-xs font-bold px-2 py-1 rounded-full" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
@@ -933,6 +1269,10 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
                 <td class="px-4 py-3 text-xs font-mono text-slate-600">{{ task.type }}</td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
+                <td class="px-4 py-3 text-xs max-w-md">
+                  <p class="text-slate-700 break-words">{{ shortText(task.prompt, 84) || '-' }}</p>
+                  <p v-if="task.errorMsg || task.pollErrorMsg" class="text-red-500 mt-1 break-words">{{ shortText(task.errorMsg || task.pollErrorMsg, 96) }}</p>
+                </td>
                 <td class="px-4 py-3 text-xs text-slate-400">{{ new Date(task.createdAt).toLocaleString() }}</td>
                 <td class="px-4 py-3">
                   <div class="flex items-center gap-2">

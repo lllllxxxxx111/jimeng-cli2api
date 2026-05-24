@@ -6,6 +6,7 @@ import { randomBytes } from 'crypto';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { adminAuth } from '../middleware/adminAuth';
+import { collectAdminStats } from '../services/adminStats';
 
 const router = Router();
 
@@ -46,6 +47,14 @@ router.get('/sys/check', adminAuth, (req, res) => res.json({ ok: true }));
 // Apply middleware to subsequent routes
 router.use(adminAuth);
 
+router.get('/stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = await collectAdminStats();
+    res.json(stats);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 const prisma = new PrismaClient();
 
@@ -396,10 +405,14 @@ router.delete('/apikeys/:id', async (req: Request, res: Response) => {
 // 查询任务列表（支持 status/apiKeyId/accountId 过滤，分页）
 router.get('/tasks', async (req: Request, res: Response) => {
   try {
-    const { status, accountId, page = '1', limit = '20' } = req.query as Record<string, string>;
+    const { status, accountId, prompt, error, type, model, page = '1', limit = '20' } = req.query as Record<string, string>;
     const where: any = {};
     if (status) where.status = status;
     if (accountId) where.accountId = accountId;
+    if (prompt) where.prompt = { contains: prompt };
+    if (error) where.OR = [{ errorMsg: { contains: error } }, { pollErrorMsg: { contains: error } }];
+    if (type) where.type = type;
+    if (model) where.model = model;
 
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
