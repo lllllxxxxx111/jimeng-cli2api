@@ -19,6 +19,7 @@ const loading = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
 const oauthModal = ref<{show:boolean;accountId:string;accountName:string;verificationUri:string;userCode:string;deviceCode:string;expiresAt:string;isNewAccount:boolean}>({ show:false, accountId:'', accountName:'', verificationUri:'', userCode:'', deviceCode:'', expiresAt:'', isNewAccount:false });
+const createAccountModal = ref<{ show: boolean; name: string; error: string }>({ show: false, name: '', error: '' });
 const checkLoginLoading = ref(false);
 const userCodeCopied = ref(false);
 const verificationUriCopied = ref(false);
@@ -244,8 +245,17 @@ const checkAccount = async (id: string) => {
 const setupNewAccount = async () => {
   errorMessage.value = '';
   successMessage.value = '';
-  const name = prompt("请输入新账号的名称 (例如: vip_account_1):");
-  if (!name) return;
+  createAccountModal.value = { show: true, name: '', error: '' };
+};
+
+const createNewAccount = async () => {
+  errorMessage.value = '';
+  successMessage.value = '';
+  const name = createAccountModal.value.name.trim();
+  if (!name) {
+    createAccountModal.value.error = '请输入账号实例名称';
+    return;
+  }
   loading.value = true;
   try {
     const res = await authFetch('/admin/accounts/login', {
@@ -255,14 +265,19 @@ const setupNewAccount = async () => {
     const data = await res.json();
     if (!res.ok) {
       errorMessage.value = data.error || "发生了未知异常";
+      createAccountModal.value.error = data.error || "发生了未知异常";
     } else if (data.account?.id && data.verificationUri) {
+      createAccountModal.value.show = false;
+      createAccountModal.value.name = '';
       oauthModal.value = { show: true, accountId: data.account.id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: true };
     } else {
       errorMessage.value = '未获取到 OAuth 授权信息，请重试。';
+      createAccountModal.value.error = '未获取到 OAuth 授权信息，请重试。';
     }
     await fetchAccounts();
   } catch (error: any) {
     errorMessage.value = "前端网络或解析错误: " + String(error.message || error);
+    createAccountModal.value.error = errorMessage.value;
   } finally {
     loading.value = false;
   }
@@ -724,6 +739,33 @@ onMounted(() => {
             <p class="text-2xl font-black text-slate-800 mt-1">{{ todaySuccessCount() }}</p>
           </div>
         </div>
+      </div>
+
+      <!-- 创建账号实例弹窗 -->
+      <div v-if="createAccountModal.show" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="!loading && (createAccountModal.show = false)">
+        <form @submit.prevent="createNewAccount" class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div class="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between">
+            <div>
+              <h3 class="font-black text-slate-900 text-lg">部署新账号实例</h3>
+              <p class="text-sm text-slate-500 mt-1">为这个即梦账号创建独立运行目录和凭证环境</p>
+            </div>
+            <button type="button" @click="createAccountModal.show = false" :disabled="loading" class="text-slate-400 hover:text-slate-600 text-2xl leading-none disabled:opacity-40">&times;</button>
+          </div>
+          <div class="px-6 py-5 space-y-4">
+            <div>
+              <label class="block text-sm font-bold text-slate-700 mb-2">账号实例名称</label>
+              <input v-model.trim="createAccountModal.name" :disabled="loading" autofocus placeholder="例如 vip_account_1" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50" />
+              <p class="text-xs text-slate-400 mt-2">建议用英文、数字和下划线，便于后续识别和筛选。</p>
+            </div>
+            <div v-if="createAccountModal.error" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm">{{ createAccountModal.error }}</div>
+          </div>
+          <div class="px-6 pb-6 flex gap-3">
+            <button type="button" @click="createAccountModal.show = false" :disabled="loading" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 disabled:opacity-50 transition">取消</button>
+            <button type="submit" :disabled="loading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
+              {{ loading ? '创建中...' : '创建并获取授权' }}
+            </button>
+          </div>
+        </form>
       </div>
 
       <!-- OAuth Device Flow 授权弹窗 -->
