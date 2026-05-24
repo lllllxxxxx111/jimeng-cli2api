@@ -546,6 +546,11 @@ const compactSdkValue = (value: any) => {
   return text.length > 72 ? `${text.slice(0, 69)}...` : text;
 };
 
+type SdkSummaryGroup = {
+  label: string;
+  items: string[];
+};
+
 const sdkResponseSummary = (value: any) => {
   if (!value) return null;
   const errorMessage = value.error?.message || (typeof value.error === 'string' ? value.error : '');
@@ -554,24 +559,31 @@ const sdkResponseSummary = (value: any) => {
       title: '请求失败',
       subtitle: errorMessage,
       stats: [{ label: '错误', value: compactSdkValue(errorMessage) }],
-      chips: [] as string[],
+      groups: [] as SdkSummaryGroup[],
     };
   }
 
   if (value.object === 'list' && Array.isArray(value.data)) {
     const capabilities = Array.from(new Set(value.data.flatMap((item: any) => Array.isArray(item.capabilities) ? item.capabilities : []))).sort();
+    const models = value.data
+      .map((item: any) => item.id === 'image_upscale' ? 'image_upscale (放大入口)' : item.id)
+      .filter(Boolean);
     const globalCapabilities = Object.entries(value.global_capabilities || {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([name]) => name);
     return {
       title: '模型列表返回成功',
-      subtitle: '这是完整能力矩阵的摘要，完整 JSON 可以展开或复制。',
+      subtitle: '功能能力和模型版本已分开展示，完整 JSON 可以展开或复制。',
       stats: [
         { label: '模型数量', value: value.data.length },
         { label: '能力数量', value: capabilities.length },
         { label: '全局能力', value: globalCapabilities.length || '-' },
       ],
-      chips: [...globalCapabilities, ...capabilities, ...value.data.map((item: any) => item.id)].filter(Boolean).slice(0, 18),
+      groups: [
+        { label: '功能能力', items: capabilities },
+        { label: '模型版本', items: models },
+        ...(globalCapabilities.length ? [{ label: '全局能力', items: globalCapabilities }] : []),
+      ] as SdkSummaryGroup[],
     };
   }
 
@@ -585,7 +597,9 @@ const sdkResponseSummary = (value: any) => {
         { label: '状态', value: value.status || value.state || '-' },
         { label: 'submit_id', value: compactSdkValue(value.submit_id || value.metadata?.submit_id || '-') },
       ],
-      chips: [value.object, value.task_type, value.metadata?.dreamina_model, value.metadata?.task_type].filter(Boolean).slice(0, 8),
+      groups: [
+        { label: '返回字段', items: [value.object, value.task_type, value.metadata?.dreamina_model, value.metadata?.task_type].filter(Boolean).slice(0, 8) },
+      ] as SdkSummaryGroup[],
     };
   }
 
@@ -598,7 +612,9 @@ const sdkResponseSummary = (value: any) => {
       { label: '字段数', value: keys.length || '-' },
       { label: 'object', value: value.object || '-' },
     ],
-    chips: keys.slice(0, 12),
+    groups: [
+      { label: '返回字段', items: keys.slice(0, 12) },
+    ] as SdkSummaryGroup[],
   };
 };
 
@@ -2368,8 +2384,13 @@ onMounted(() => {
                     <p class="text-sm font-black text-slate-900 mt-2 break-words">{{ item.value }}</p>
                   </div>
                 </div>
-                <div v-if="sdkResponseSummary(sdkResponse)?.chips.length" class="flex flex-wrap gap-2">
-                  <span v-for="chip in sdkResponseSummary(sdkResponse)?.chips" :key="chip" class="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-full">{{ chip }}</span>
+                <div v-if="sdkResponseSummary(sdkResponse)?.groups.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <div v-for="group in sdkResponseSummary(sdkResponse)?.groups" :key="group.label" class="space-y-2">
+                    <p class="text-xs font-black text-slate-500 uppercase tracking-wider">{{ group.label }}</p>
+                    <div class="flex flex-wrap gap-2">
+                      <span v-for="item in group.items" :key="`${group.label}-${item}`" class="text-xs font-bold px-2.5 py-1 rounded-full border" :class="group.label === '模型版本' ? 'text-emerald-700 bg-emerald-50 border-emerald-100' : 'text-indigo-700 bg-indigo-50 border-indigo-100'">{{ item }}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
               <pre v-if="sdkShowRawResponse" class="bg-slate-950 text-slate-200 rounded-xl p-5 text-xs font-mono max-h-[420px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkResponse) }}</pre>
@@ -2400,8 +2421,13 @@ onMounted(() => {
                     <p class="text-sm font-black text-slate-900 mt-2 break-words">{{ item.value }}</p>
                   </div>
                 </div>
-                <div v-if="sdkResponseSummary(sdkPollResponse)?.chips.length" class="flex flex-wrap gap-2">
-                  <span v-for="chip in sdkResponseSummary(sdkPollResponse)?.chips" :key="chip" class="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-full">{{ chip }}</span>
+                <div v-if="sdkResponseSummary(sdkPollResponse)?.groups.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <div v-for="group in sdkResponseSummary(sdkPollResponse)?.groups" :key="group.label" class="space-y-2">
+                    <p class="text-xs font-black text-slate-500 uppercase tracking-wider">{{ group.label }}</p>
+                    <div class="flex flex-wrap gap-2">
+                      <span v-for="item in group.items" :key="`${group.label}-${item}`" class="text-xs font-bold px-2.5 py-1 rounded-full border" :class="group.label === '模型版本' ? 'text-emerald-700 bg-emerald-50 border-emerald-100' : 'text-indigo-700 bg-indigo-50 border-indigo-100'">{{ item }}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
               <pre v-if="sdkShowRawPollResponse" class="bg-slate-950 text-slate-200 rounded-xl p-5 text-xs font-mono max-h-[420px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkPollResponse) }}</pre>
