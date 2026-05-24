@@ -75,7 +75,18 @@ const nativeQueryDownload = ref(false);
 const nativeQueryDownloadDirName = ref('');
 const nativeShowAdvancedSessions = ref(false);
 
-const currentTab = ref('accounts');
+const currentTab = ref('monitor');
+
+const tabMeta: Record<string, { title: string; subtitle: string }> = {
+  monitor: { title: '运行监控', subtitle: '账号池、任务吞吐、失败率和运行资源' },
+  accounts: { title: '账号池', subtitle: '维护服务端即梦账号实例和授权状态' },
+  apikeys: { title: 'API 令牌', subtitle: '签发客户端访问令牌并绑定调度账号' },
+  tasks: { title: '任务管理', subtitle: '追踪生成任务、失败原因和轮询状态' },
+  risk: { title: '失败预检', subtitle: '提交前比对历史失败提示词' },
+  native: { title: '原生工具', subtitle: '面向管理员的 CLI 会话、任务和结果查询' },
+  docs: { title: '集成文档', subtitle: '查看 OpenAI SDK 兼容入口和即梦扩展参数' },
+  settings: { title: '管理员安全', subtitle: '修改后台访问密码' },
+};
 
 const headers = () => ({
   'Content-Type': 'application/json',
@@ -196,36 +207,127 @@ const shortText = (value: string, max = 90) => {
   return text.length <= max ? text : `${text.slice(0, max - 1)}...`;
 };
 
-const pageTitle = () => ({
-  accounts: '内部账号池',
-  apikeys: 'API 令牌分发',
-  monitor: '运行监控',
-  risk: '失败预检',
-  tasks: '任务管理',
-  native: 'CLI 原生工具',
-  docs: 'API 集成文档',
-  settings: '管理员安全',
-}[currentTab.value] || '控制台');
-
-const pageSubtitle = () => ({
-  accounts: '隔离运行账号、检测积分余额、处理授权状态',
-  apikeys: '签发客户端访问令牌，并绑定到指定账号或全局池',
-  monitor: '查看账号轮询、创意产量、失败率和运行资源',
-  risk: '提交前检查历史失败相似度，减少排队后的无效失败',
-  tasks: '按状态、账号、提示词和错误原因追踪任务',
-  native: '按账号调用新版 CLI 的会话、任务列表和结果查询能力',
-  docs: '查看当前服务暴露的 CLI 功能、参数和调用示例',
-  settings: '修改后台访问密码和安全凭证',
-}[currentTab.value] || '');
+const pageTitle = () => tabMeta[currentTab.value]?.title || '控制台';
+const pageSubtitle = () => tabMeta[currentTab.value]?.subtitle || '';
 
 const availableAccountCount = () => stats.value?.accounts?.idle ?? accounts.value.filter((item: any) => item.status === 'IDLE').length;
 const processingTaskCount = () => stats.value?.tasks?.processing ?? tasks.value.filter((item: any) => item.status === 'PROCESSING').length;
 const todaySuccessCount = () => stats.value?.tasks?.today?.success ?? 0;
 const riskScorePercent = (value: number) => `${Math.round((Number(value) || 0) * 100)}%`;
 
+const accountStatusLabel = (status: string) => ({
+  IDLE: '可用',
+  BUSY: '忙碌',
+  ERROR: '异常',
+}[status] || status || '-');
+
+const accountStatusClass = (status: string) => ({
+  IDLE: 'bg-emerald-100 text-emerald-700',
+  BUSY: 'bg-blue-100 text-blue-700',
+  ERROR: 'bg-red-100 text-red-600',
+}[status] || 'bg-slate-100 text-slate-500');
+
+const accountDotClass = (status: string) => ({
+  IDLE: 'bg-emerald-400',
+  BUSY: 'bg-blue-400',
+  ERROR: 'bg-red-400',
+}[status] || 'bg-slate-300');
+
+const operationHealth = () => {
+  if (!stats.value) {
+    return {
+      label: '等待数据',
+      detail: '运行数据尚未加载',
+      className: 'bg-slate-100 text-slate-600',
+      accentClass: 'bg-slate-400',
+    };
+  }
+  if (stats.value.accounts.idle <= 0) {
+    return {
+      label: '账号不可用',
+      detail: '当前没有可直接调度的账号',
+      className: 'bg-red-100 text-red-700',
+      accentClass: 'bg-red-400',
+    };
+  }
+  if (stats.value.failures.todayRate >= 0.2 || stats.value.accounts.error > 0) {
+    return {
+      label: '需要处理',
+      detail: '失败率或账号异常偏高',
+      className: 'bg-amber-100 text-amber-700',
+      accentClass: 'bg-amber-400',
+    };
+  }
+  if (stats.value.tasks.processing || stats.value.tasks.pending) {
+    return {
+      label: '生产中',
+      detail: '队列正在消化任务',
+      className: 'bg-blue-100 text-blue-700',
+      accentClass: 'bg-blue-400',
+    };
+  }
+  return {
+    label: '运行稳定',
+    detail: '账号池和任务队列正常',
+    className: 'bg-emerald-100 text-emerald-700',
+    accentClass: 'bg-emerald-400',
+  };
+};
+
 const getAccountMetrics = (accountId: string) => {
   const row = stats.value?.accounts?.accounts?.find((item: any) => item.id === accountId);
   return row || { totalCreatives: 0, todayCreatives: 0, processingTasks: 0, todaySuccess: 0, failedTasks: 0, todayFailed: 0 };
+};
+
+const navGroups = [
+  {
+    title: '总览',
+    items: [
+      { key: 'monitor', label: '运行监控', badge: () => processingTaskCount() },
+      { key: 'tasks', label: '任务管理', badge: () => taskTotal || stats.value?.tasks?.total || 0 },
+      { key: 'risk', label: '失败预检', badge: () => stats.value?.failures?.byPrompt?.length || 0 },
+    ],
+  },
+  {
+    title: '配置',
+    items: [
+      { key: 'accounts', label: '账号池', badge: () => accounts.value.length },
+      { key: 'apikeys', label: 'API 令牌', badge: () => apikeys.value.length },
+    ],
+  },
+  {
+    title: '集成',
+    items: [
+      { key: 'docs', label: '接口文档', badge: 'SDK' },
+      { key: 'native', label: '原生工具', badge: 'CLI' },
+    ],
+  },
+  {
+    title: '系统',
+    items: [
+      { key: 'settings', label: '管理员安全', badge: '' },
+    ],
+  },
+];
+
+const navBadge = (item: any) => typeof item.badge === 'function' ? item.badge() : item.badge;
+const navItemClass = (key: string) => currentTab.value === key
+  ? 'bg-white text-slate-950 shadow-sm border-white'
+  : 'text-slate-300 hover:bg-white/5 hover:text-white border-transparent';
+
+const setTab = (tab: string) => {
+  currentTab.value = tab;
+  if (tab === 'monitor') fetchStats();
+  if (tab === 'tasks') fetchTasks(1);
+};
+
+const openTaskList = (status = '') => {
+  taskFilterStatus.value = status;
+  taskFilterAccountId.value = '';
+  taskFilterPrompt.value = '';
+  taskFilterError.value = '';
+  currentTab.value = 'tasks';
+  fetchTasks(1);
 };
 
 const selectedNativeAccountName = () => accounts.value.find((item: any) => item.id === nativeAccountId.value)?.name || '';
@@ -919,36 +1021,43 @@ onMounted(() => {
       <form @submit.prevent="doLogin" class="space-y-6">
         <input v-model="loginPassword" type="password" required class="w-full bg-black/20 border border-white/10 text-white px-5 py-4 rounded-xl placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="管理员密码" />
         <p v-if="loginError" class="text-red-400 text-xs text-left">{{ loginError }}</p>
-        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-indigo-500/30">登录控制台</button>
+        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl">登录控制台</button>
       </form>
     </div>
   </div>
 
   <div v-else class="flex min-h-screen bg-slate-100 text-slate-800">
-    <aside class="w-72 bg-slate-950 text-white flex flex-col shadow-2xl z-10 p-5 shrink-0">
-      <div class="mb-6 rounded-2xl bg-white/5 border border-white/10 p-4">
+    <aside class="w-72 bg-slate-950 text-white flex flex-col shadow-xl z-10 p-5 shrink-0">
+      <div class="mb-5 border-b border-white/10 pb-5">
         <p class="text-xs font-bold text-indigo-300 tracking-wider uppercase">Jimeng Hub</p>
-        <h1 class="text-2xl font-black mt-1">即梦Cli_api</h1>
-        <p class="text-xs text-slate-400 mt-2 leading-5">服务器端账号池、任务调度和生成接口管理</p>
+        <h1 class="text-2xl font-black mt-1">即梦调度台</h1>
+        <p class="text-xs text-slate-400 mt-2 leading-5">账号池、任务队列、SDK 接入和运行监控</p>
       </div>
-      <nav class="flex-1 space-y-1">
-        <button @click="currentTab = 'accounts'" :class="currentTab === 'accounts' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>内部账号池</span><span class="text-xs opacity-70">{{ accounts.length }}</span></button>
-        <button @click="currentTab = 'apikeys'" :class="currentTab === 'apikeys' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>API 令牌分发</span><span class="text-xs opacity-70">{{ apikeys.length }}</span></button>
-        <button @click="currentTab = 'monitor'; fetchStats()" :class="currentTab === 'monitor' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>运行监控</span><span class="text-xs opacity-70">{{ processingTaskCount() }}</span></button>
-        <button @click="currentTab = 'risk'" :class="currentTab === 'risk' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>失败预检</span><span class="text-xs opacity-70">{{ stats?.failures?.byPrompt?.length || 0 }}</span></button>
-        <button @click="currentTab = 'tasks'; fetchTasks(1)" :class="currentTab === 'tasks' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>任务管理</span><span class="text-xs opacity-70">{{ taskTotal || stats?.tasks?.total || 0 }}</span></button>
-        <button @click="currentTab = 'native'" :class="currentTab === 'native' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>CLI 原生工具</span><span class="text-xs opacity-70">NEW</span></button>
-        <button @click="currentTab = 'docs'" :class="currentTab === 'docs' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition flex items-center justify-between"><span>API 集成文档</span><span class="text-xs opacity-70">CLI</span></button>
-        <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-950/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'" class="w-full text-left px-4 py-3 rounded-xl font-semibold transition mt-4 flex items-center justify-between"><span>管理员安全</span><span class="text-xs opacity-70">Admin</span></button>
-      </nav>
-      <div class="rounded-2xl bg-slate-900 border border-white/10 p-4 mb-4">
-        <div class="flex items-center justify-between text-xs text-slate-400">
-          <span>服务端口</span>
-          <span class="font-mono text-indigo-300">3000</span>
+      <nav class="flex-1 space-y-5 overflow-y-auto pr-1">
+        <div v-for="group in navGroups" :key="group.title">
+          <p class="px-3 text-[11px] font-black text-slate-500 tracking-wider mb-2">{{ group.title }}</p>
+          <div class="space-y-1">
+            <button
+              v-for="item in group.items"
+              :key="item.key"
+              @click="setTab(item.key)"
+              :class="navItemClass(item.key)"
+              class="w-full text-left px-3 py-2.5 rounded-xl font-semibold transition flex items-center justify-between border"
+            >
+              <span>{{ item.label }}</span>
+              <span v-if="navBadge(item) !== '' && navBadge(item) !== undefined" class="text-[11px] font-black px-2 py-0.5 rounded-full" :class="currentTab === item.key ? 'bg-slate-100 text-slate-500' : 'bg-white/10 text-slate-400'">{{ navBadge(item) }}</span>
+            </button>
+          </div>
         </div>
-        <div class="flex items-center justify-between text-xs text-slate-400 mt-2">
-          <span>运行状态</span>
-          <span class="font-mono text-emerald-300">ONLINE</span>
+      </nav>
+      <div class="rounded-xl bg-slate-900 border border-white/10 p-4 my-4 space-y-2">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>Base URL</span>
+          <span class="font-mono text-indigo-300">:3000/v1</span>
+        </div>
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>状态</span>
+          <span class="font-mono text-emerald-300">online</span>
         </div>
       </div>
       <button @click="doLogout" class="w-full bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-300 py-3 rounded-xl font-bold transition">退出系统</button>
@@ -956,31 +1065,22 @@ onMounted(() => {
 
     <main class="flex-1 p-8 overflow-y-auto h-screen">
 
-      <div class="mb-8 rounded-3xl bg-white border border-slate-200 shadow-sm px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-5">
-        <div>
+      <div class="mb-6 bg-white border border-slate-200 shadow-sm px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-5">
+        <div class="min-w-0">
           <p class="text-xs font-bold text-indigo-600 tracking-wider uppercase">Console</p>
           <h2 class="text-3xl font-black text-slate-900 mt-1">{{ pageTitle() }}</h2>
           <p class="text-sm text-slate-500 mt-1">{{ pageSubtitle() }}</p>
         </div>
-        <div class="grid grid-cols-3 gap-3 min-w-full xl:min-w-[520px]">
-          <div class="rounded-2xl bg-emerald-50 border border-emerald-100 px-4 py-3">
-            <p class="text-[11px] font-bold text-emerald-600 uppercase">可用账号</p>
-            <p class="text-2xl font-black text-emerald-700 mt-1">{{ availableAccountCount() }}</p>
-          </div>
-          <div class="rounded-2xl bg-indigo-50 border border-indigo-100 px-4 py-3">
-            <p class="text-[11px] font-bold text-indigo-600 uppercase">处理中</p>
-            <p class="text-2xl font-black text-indigo-700 mt-1">{{ processingTaskCount() }}</p>
-          </div>
-          <div class="rounded-2xl bg-slate-50 border border-slate-200 px-4 py-3">
-            <p class="text-[11px] font-bold text-slate-500 uppercase">今日成功</p>
-            <p class="text-2xl font-black text-slate-800 mt-1">{{ todaySuccessCount() }}</p>
-          </div>
+        <div class="flex flex-wrap gap-2 text-xs font-semibold">
+          <span class="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full">Base URL: :3000/v1</span>
+          <span v-if="currentTab === 'monitor'" class="px-3 py-1.5 rounded-full" :class="operationHealth().className">{{ operationHealth().label }}</span>
+          <button v-if="currentTab !== 'monitor'" @click="setTab('monitor')" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-full">回到监控</button>
         </div>
       </div>
 
       <!-- 创建账号实例弹窗 -->
       <div v-if="createAccountModal.show" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="!loading && (createAccountModal.show = false)">
-        <form @submit.prevent="createNewAccount" class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        <form @submit.prevent="createNewAccount" class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
           <div class="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between">
             <div>
               <h3 class="font-black text-slate-900 text-lg">部署新账号实例</h3>
@@ -1007,7 +1107,7 @@ onMounted(() => {
 
       <!-- OAuth Device Flow 授权弹窗 -->
       <div v-if="oauthModal.show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
           <!-- 头部 -->
           <div class="px-6 pt-6 pb-4 border-b border-slate-100">
             <div class="flex items-center justify-between">
@@ -1059,7 +1159,7 @@ onMounted(() => {
           <div class="px-6 pb-6 flex gap-3">
             <button @click="closeOAuthModal" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 transition">取消</button>
             <button @click="doCheckLogin" :disabled="checkLoginLoading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
-              {{ checkLoginLoading ? '确认授权中...' : '✅ 我已完成授权' }}
+              {{ checkLoginLoading ? '确认授权中...' : '我已完成授权' }}
             </button>
           </div>
         </div>
@@ -1077,36 +1177,65 @@ onMounted(() => {
 
       <!-- ========== TAB: MONITOR ========== -->
       <div v-if="currentTab === 'monitor'" class="space-y-6">
-        <div class="flex items-center justify-end flex-wrap gap-4">
-          <button @click="fetchStats" :disabled="statsLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">刷新数据</button>
+        <div class="bg-white border border-slate-200 shadow-sm p-5 flex flex-col 2xl:flex-row 2xl:items-center 2xl:justify-between gap-5">
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4 flex-1">
+            <div class="border border-slate-200 bg-slate-50 p-4">
+              <p class="text-xs font-black text-slate-500">1. 账号就绪</p>
+              <p class="text-2xl font-black text-slate-900 mt-2">{{ availableAccountCount() }}</p>
+              <p class="text-xs text-slate-500 mt-1">可立即调度的账号</p>
+            </div>
+            <div class="border border-slate-200 bg-slate-50 p-4">
+              <p class="text-xs font-black text-slate-500">2. 队列压力</p>
+              <p class="text-2xl font-black text-slate-900 mt-2">{{ processingTaskCount() }}</p>
+              <p class="text-xs text-slate-500 mt-1">正在执行的 CLI 任务</p>
+            </div>
+            <div class="border border-slate-200 bg-slate-50 p-4">
+              <p class="text-xs font-black text-slate-500">3. 今日产出</p>
+              <p class="text-2xl font-black text-slate-900 mt-2">{{ todaySuccessCount() }}</p>
+              <p class="text-xs text-slate-500 mt-1">已完成创意数</p>
+            </div>
+            <div class="border border-slate-200 bg-slate-50 p-4">
+              <p class="text-xs font-black text-slate-500">4. 当前判断</p>
+              <div class="flex items-center gap-2 mt-2">
+                <span class="w-2.5 h-2.5 rounded-full" :class="operationHealth().accentClass"></span>
+                <span class="text-lg font-black px-2 py-1 rounded-lg" :class="operationHealth().className">{{ operationHealth().label }}</span>
+              </div>
+              <p class="text-xs text-slate-500 mt-1">{{ operationHealth().detail }}</p>
+            </div>
+          </div>
+          <div class="flex flex-wrap 2xl:flex-col gap-2 2xl:w-40">
+            <button @click="fetchStats" :disabled="statsLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">刷新数据</button>
+            <button @click="openTaskList('PROCESSING')" class="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-5 py-2.5 rounded-lg font-bold text-sm">处理中任务</button>
+            <button @click="openTaskList('FAILED')" class="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-5 py-2.5 rounded-lg font-bold text-sm">失败任务</button>
+          </div>
         </div>
 
         <div v-if="statsError" class="bg-red-50 border border-red-200 text-red-700 px-5 py-4 rounded-xl text-sm font-medium">{{ statsError }}</div>
-        <div v-if="statsLoading && !stats" class="text-center py-20 text-slate-400 bg-white rounded-2xl border border-slate-200">运行数据加载中...</div>
+        <div v-if="statsLoading && !stats" class="text-center py-20 text-slate-400 bg-white border border-slate-200">运行数据加载中...</div>
 
         <template v-if="stats">
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">账号池</p>
               <p class="text-3xl font-black text-slate-800 mt-2">{{ stats.accounts.total }}</p>
               <p class="text-xs text-slate-500 mt-1">可用 {{ stats.accounts.idle }} · 忙碌 {{ stats.accounts.busy }} · 异常 {{ stats.accounts.error }}</p>
             </div>
-            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">任务总数</p>
               <p class="text-3xl font-black text-slate-800 mt-2">{{ stats.tasks.total }}</p>
               <p class="text-xs text-slate-500 mt-1">处理中 {{ stats.tasks.processing }} · 待处理 {{ stats.tasks.pending }}</p>
             </div>
-            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">今日创意</p>
               <p class="text-3xl font-black text-emerald-600 mt-2">{{ stats.tasks.today.success }}</p>
               <p class="text-xs text-slate-500 mt-1">今日提交 {{ stats.tasks.today.total }} · 失败 {{ stats.tasks.today.failed }}</p>
             </div>
-            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">失败率</p>
               <p class="text-3xl font-black text-red-500 mt-2">{{ formatRate(stats.failures.rate) }}</p>
               <p class="text-xs text-slate-500 mt-1">今日 {{ formatRate(stats.failures.todayRate) }} · 累计失败 {{ stats.failures.total }}</p>
             </div>
-            <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">内存占用</p>
               <p class="text-3xl font-black text-slate-800 mt-2">{{ formatBytes(stats.runtime.memory.rss) }}</p>
               <p class="text-xs text-slate-500 mt-1">系统已用 {{ formatRate(stats.runtime.systemMemory.usedPercent / 100) }}</p>
@@ -1114,7 +1243,7 @@ onMounted(() => {
           </div>
 
           <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+            <div class="bg-white border border-slate-200 shadow-sm p-6 space-y-4">
               <h3 class="font-black text-slate-800">运行实例</h3>
               <div class="space-y-3 text-sm">
                 <div class="flex justify-between gap-4"><span class="text-slate-400">PID</span><span class="font-mono text-slate-700">{{ stats.runtime.pid }}</span></div>
@@ -1128,7 +1257,7 @@ onMounted(() => {
               </div>
             </div>
 
-            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 xl:col-span-2">
+            <div class="bg-white border border-slate-200 shadow-sm p-6 xl:col-span-2">
               <div class="flex items-center justify-between mb-4">
                 <h3 class="font-black text-slate-800">近 7 天运行走势</h3>
                 <span class="text-xs text-slate-400">成功 / 失败 / 处理中</span>
@@ -1147,7 +1276,7 @@ onMounted(() => {
             </div>
           </div>
 
-          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
               <h3 class="font-black text-slate-800">账号运行矩阵</h3>
               <span class="text-xs text-slate-400">点击任务可进入筛选后的任务管理</span>
@@ -1172,7 +1301,7 @@ onMounted(() => {
                       <p class="font-semibold text-slate-800">{{ row.name }}</p>
                       <p class="text-xs text-slate-400 font-mono">{{ row.id }}</p>
                     </td>
-                    <td class="px-4 py-3"><span class="text-xs font-bold px-2 py-1 rounded-full" :class="row.status === 'IDLE' ? 'bg-green-100 text-green-700' : row.status === 'BUSY' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'">{{ row.status }}</span></td>
+                    <td class="px-4 py-3"><span class="text-xs font-bold px-2 py-1 rounded-full" :class="accountStatusClass(row.status)">{{ accountStatusLabel(row.status) }}</span></td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ row.creditBalance ?? '-' }}</td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ row.todaySuccess }} / {{ row.todayCreatives }}</td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ row.processingTasks }}</td>
@@ -1185,7 +1314,7 @@ onMounted(() => {
           </div>
 
           <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+            <div class="bg-white border border-slate-200 shadow-sm p-6 space-y-4">
               <h3 class="font-black text-slate-800">高频失败提示词</h3>
               <div v-if="stats.failures.byPrompt.length === 0" class="text-sm text-slate-400 py-6">暂无失败提示词</div>
               <div v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" class="border border-slate-100 rounded-xl p-4">
@@ -1203,7 +1332,7 @@ onMounted(() => {
               </div>
             </div>
 
-            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
+            <div class="bg-white border border-slate-200 shadow-sm p-6 space-y-5">
               <div>
                 <h3 class="font-black text-slate-800 mb-4">失败原因排行</h3>
                 <div v-if="stats.failures.byReason.length === 0" class="text-sm text-slate-400 py-6">暂无失败原因</div>
@@ -1235,10 +1364,10 @@ onMounted(() => {
             </div>
           </div>
 
-          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
               <h3 class="font-black text-slate-800">最近失败任务</h3>
-              <button @click="currentTab = 'tasks'; taskFilterStatus = 'FAILED'; fetchTasks(1)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">查看全部失败</button>
+              <button @click="openTaskList('FAILED')" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">查看全部失败</button>
             </div>
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
@@ -1279,24 +1408,24 @@ onMounted(() => {
       <div v-if="currentTab === 'accounts'" class="space-y-6">
         <div class="flex items-center justify-between">
           <p class="text-sm text-slate-500">每个账号独立 homeDir 和凭证，用于后端轮询分发任务</p>
-          <button @click="setupNewAccount" :disabled="loading" class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-xl font-bold shadow transition">➕ 部署新账号实例</button>
+          <button @click="setupNewAccount" :disabled="loading" class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-lg font-bold transition">部署新账号实例</button>
         </div>
-        <div v-if="accounts.length === 0" class="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+        <div v-if="accounts.length === 0" class="bg-white border border-slate-200 shadow-sm overflow-hidden">
           <div class="grid grid-cols-1 xl:grid-cols-[1fr_360px]">
             <div class="p-10">
               <p class="text-xs font-bold text-indigo-600 uppercase tracking-wider">Account Pool</p>
               <h3 class="text-3xl font-black text-slate-900 mt-3">还没有可调度账号</h3>
               <p class="text-sm text-slate-500 mt-3 leading-6 max-w-xl">先部署一个即梦账号实例并完成授权，API Key 才能拿到可用账号去提交图片、视频和高清放大任务。</p>
               <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-7">
-                <div class="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                <div class="bg-slate-50 border border-slate-100 p-4">
                   <p class="text-xs font-black text-slate-500">1. 部署实例</p>
                   <p class="text-xs text-slate-400 mt-2 leading-5">创建独立账号目录</p>
                 </div>
-                <div class="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                <div class="bg-slate-50 border border-slate-100 p-4">
                   <p class="text-xs font-black text-slate-500">2. 完成授权</p>
                   <p class="text-xs text-slate-400 mt-2 leading-5">浏览器确认登录态</p>
                 </div>
-                <div class="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                <div class="bg-slate-50 border border-slate-100 p-4">
                   <p class="text-xs font-black text-slate-500">3. 签发 Key</p>
                   <p class="text-xs text-slate-400 mt-2 leading-5">绑定账号或全局池</p>
                 </div>
@@ -1315,13 +1444,13 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        <div v-for="acc in accounts" :key="acc.id" class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div v-for="acc in accounts" :key="acc.id" class="bg-white shadow-sm border border-slate-200 overflow-hidden">
           <div class="p-6 flex flex-col sm:flex-row sm:items-center gap-4">
             <div class="flex-1">
               <div class="flex items-center gap-3 mb-1">
-                <span class="inline-block w-3 h-3 rounded-full flex-shrink-0" :class="acc.status === 'IDLE' ? 'bg-green-400' : 'bg-red-400'"></span>
+                <span class="inline-block w-3 h-3 rounded-full flex-shrink-0" :class="accountDotClass(acc.status)"></span>
                 <p class="font-bold text-lg text-slate-800">{{ acc.name }}</p>
-                <span class="text-xs font-bold px-2 py-0.5 rounded-full" :class="acc.status === 'IDLE' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'">{{ acc.status === 'IDLE' ? 'ACTIVE' : acc.status === 'ERROR' ? 'EXPIRED' : acc.status }}</span>
+                <span class="text-xs font-bold px-2 py-0.5 rounded-full" :class="accountStatusClass(acc.status)">{{ accountStatusLabel(acc.status) }}</span>
               </div>
               <p class="text-xs text-slate-400 font-mono">ID: {{ acc.id }}</p>
               <div v-if="acc.creditBalance" class="mt-1 text-sm text-slate-500">余额: <span class="font-bold text-emerald-600">{{ acc.creditBalance }}</span> 积分 · 最后检查: {{ acc.lastChecked ? new Date(acc.lastChecked).toLocaleString() : '从未' }}</div>
@@ -1337,13 +1466,13 @@ onMounted(() => {
                 任务
               </button>
               <button @click="checkAccount(acc.id)" :disabled="checkingId === acc.id" class="text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
-                {{ checkingId === acc.id ? '⏳ CLI 查询中' : '🔍 检测状态' }}
+                {{ checkingId === acc.id ? 'CLI 查询中' : '检测状态' }}
               </button>
               <button @click="reloginAccount(acc.id, acc.name)" :disabled="reloginLoadingId === acc.id" class="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
-                {{ reloginLoadingId === acc.id ? '⏳' : '🔗' }} 重新授权
+                {{ reloginLoadingId === acc.id ? '授权中' : '重新授权' }}
               </button>
               <button @click="deleteAccount(acc.id, acc.name)" class="text-sm font-semibold text-white bg-red-500 hover:bg-red-600 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
-                🗑 删除
+                删除
               </button>
             </div>
           </div>
@@ -1352,20 +1481,20 @@ onMounted(() => {
 
       <!-- ========== TAB: API KEYS ========== -->
       <div v-if="currentTab === 'apikeys'" class="space-y-6">
-        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
-          <h3 class="font-bold text-slate-700 text-sm uppercase tracking-wider">✚ 签发新令牌</h3>
+        <div class="bg-white p-6 shadow-sm border border-slate-200 space-y-4">
+          <h3 class="font-bold text-slate-700 text-sm uppercase tracking-wider">签发新令牌</h3>
           <div class="flex flex-wrap gap-3">
             <input v-model="apiKeyOwner" placeholder="拥有者标识 (如 client_01)" class="flex-1 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-w-[180px]" />
             <input v-model.number="apiKeyQuota" type="number" placeholder="额度上限 (留空=无限)" class="w-52 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
             <!-- 自定义账号下拉 -->
             <div class="relative">
               <button type="button" @click="showAccountDropdown = !showAccountDropdown" class="flex items-center gap-2 border border-slate-300 bg-white px-4 py-2.5 rounded-lg text-sm hover:border-indigo-400 focus:ring-2 focus:ring-indigo-500 outline-none min-w-[220px] justify-between">
-                <span v-if="!apiKeyBoundAccountId" class="text-slate-500">🔀 不绑定（自动分配）</span>
+                <span v-if="!apiKeyBoundAccountId" class="text-slate-500">不绑定（自动分配）</span>
                 <template v-else>
                   <template v-for="acc in accounts" :key="acc.id">
                     <span v-if="acc.id === apiKeyBoundAccountId">
-                      <span>{{ acc.status === 'IDLE' ? '✅' : acc.status === 'BUSY' ? '⏳' : '❌' }}</span>
-                      <span class="font-semibold text-slate-800 ml-1">{{ acc.name }}</span>
+                      <span class="font-semibold text-slate-800">{{ acc.name }}</span>
+                      <span class="text-slate-400 ml-1 text-xs">{{ accountStatusLabel(acc.status) }}</span>
                       <span class="text-slate-400 ml-1 text-xs">{{ acc.creditBalance ?? '?' }} 积分</span>
                     </span>
                   </template>
@@ -1374,33 +1503,32 @@ onMounted(() => {
               </button>
               <div v-if="showAccountDropdown" class="absolute left-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-xl w-72 overflow-hidden">
                 <div @click="apiKeyBoundAccountId = ''; showAccountDropdown = false" class="flex items-center gap-3 px-4 py-3 hover:bg-slate-50 cursor-pointer border-b border-slate-100">
-                  <span class="text-lg">🔀</span>
                   <div>
                     <div class="text-sm font-semibold text-slate-700">不绑定</div>
                     <div class="text-xs text-slate-400">系统自动从账号池分配</div>
                   </div>
                 </div>
                 <div v-for="acc in accounts" :key="acc.id" @click="apiKeyBoundAccountId = acc.id; showAccountDropdown = false" class="flex items-center gap-3 px-4 py-3 hover:bg-indigo-50 cursor-pointer" :class="apiKeyBoundAccountId === acc.id ? 'bg-indigo-50' : ''">
-                  <span class="text-lg">{{ acc.status === 'IDLE' ? '✅' : acc.status === 'BUSY' ? '⏳' : '❌' }}</span>
+                  <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="accountDotClass(acc.status)"></span>
                   <div>
                     <div class="text-sm font-semibold text-slate-800">{{ acc.name }}</div>
-                    <div class="text-xs text-slate-400">{{ acc.creditBalance ?? '?' }} 积分 · {{ acc.status }}</div>
+                    <div class="text-xs text-slate-400">{{ acc.creditBalance ?? '?' }} 积分 · {{ accountStatusLabel(acc.status) }}</div>
                   </div>
-                  <span v-if="apiKeyBoundAccountId === acc.id" class="ml-auto text-indigo-600 font-bold text-sm">✓</span>
+                  <span v-if="apiKeyBoundAccountId === acc.id" class="ml-auto text-indigo-600 font-bold text-sm">已选</span>
                 </div>
               </div>
             </div>
             <button @click="generateApiKey" :disabled="loading" class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white px-6 py-2.5 rounded-lg font-bold text-sm shadow transition">签发令牌</button>
           </div>
           <div v-if="apiKeyResult" class="bg-emerald-50 border border-emerald-200 p-4 rounded-xl">
-            <p class="text-xs font-bold text-emerald-700 mb-2">✅ 新令牌已生成 — 请立即复制，此处仅显示一次</p>
+            <p class="text-xs font-bold text-emerald-700 mb-2">新令牌已生成，请立即复制，此处仅显示一次</p>
             <div class="flex items-center gap-2">
               <code class="flex-1 font-mono text-sm text-emerald-800 break-all select-all">{{ apiKeyResult }}</code>
-              <button @click="copyKey(apiKeyResult)" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-bold flex-shrink-0 transition">📋 复制</button>
+              <button @click="copyKey(apiKeyResult)" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-bold flex-shrink-0 transition">复制</button>
             </div>
           </div>
         </div>
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div class="bg-white shadow-sm border border-slate-200 overflow-hidden">
           <table class="w-full text-sm">
             <thead class="bg-slate-50 border-b border-slate-200">
               <tr>
@@ -1419,13 +1547,13 @@ onMounted(() => {
                 <td class="px-6 py-4">
                   <div class="flex items-center gap-2">
                     <code class="font-mono text-xs text-slate-600 select-all">{{ revealedKeyIds.has(key.id) ? key.key : maskKey(key.key) }}</code>
-                    <button @click="toggleRevealKey(key.id)" class="text-slate-400 hover:text-indigo-600 text-sm px-1 py-0.5 rounded transition" :title="revealedKeyIds.has(key.id) ? '隐藏' : '显示明文'">{{ revealedKeyIds.has(key.id) ? '🙈' : '👁' }}</button>
-                    <button @click="copyKey(key.key)" class="text-slate-400 hover:text-indigo-600 text-sm px-1 py-0.5 rounded transition" title="复制">📋</button>
+                    <button @click="toggleRevealKey(key.id)" class="text-slate-500 hover:text-indigo-600 text-xs px-2 py-1 rounded border border-slate-200 transition" :title="revealedKeyIds.has(key.id) ? '隐藏' : '显示明文'">{{ revealedKeyIds.has(key.id) ? '隐藏' : '显示' }}</button>
+                    <button @click="copyKey(key.key)" class="text-slate-500 hover:text-indigo-600 text-xs px-2 py-1 rounded border border-slate-200 transition" title="复制">复制</button>
                   </div>
                 </td>
                 <td class="px-6 py-4">
-                  <span v-if="key.boundAccount" class="text-xs font-semibold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">🔒 {{ key.boundAccount.name }}</span>
-                  <span v-else class="text-xs text-slate-400">🔀 自动分配</span>
+                  <span v-if="key.boundAccount" class="text-xs font-semibold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">{{ key.boundAccount.name }}</span>
+                  <span v-else class="text-xs text-slate-400">自动分配</span>
                 </td>
                 <td class="px-6 py-4 text-slate-500 text-xs">{{ key.used || 0 }} / {{ key.quota || '∞' }}</td>
                 <td class="px-6 py-4"><span class="text-xs font-bold px-2 py-1 rounded-full" :class="key.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'">{{ key.isActive ? '启用' : '停用' }}</span></td>
@@ -1444,17 +1572,17 @@ onMounted(() => {
 
       <!-- ========== REBIND MODAL ========== -->
       <div v-if="rebindModal.show" class="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 px-4">
-        <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md p-6 space-y-5">
+        <div class="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-md p-6 space-y-5">
           <div class="flex items-center justify-between">
-            <h3 class="font-black text-slate-800 text-lg">🔁 修改绑定账号</h3>
+            <h3 class="font-black text-slate-800 text-lg">修改绑定账号</h3>
             <button @click="rebindModal.show = false" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
           </div>
           <p class="text-sm text-slate-500">令牌拥有者：<span class="font-bold text-slate-700">{{ rebindModal.keyOwner }}</span></p>
           <div>
             <label class="block text-sm font-bold text-slate-700 mb-2">选择新的绑定账号</label>
             <select v-model="rebindNewAccountId" class="w-full border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
-              <option value="">🔀 不绑定（自动分配公共池）</option>
-              <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.status === 'IDLE' ? '✅' : acc.status === 'BUSY' ? '⏳' : '❌' }} {{ acc.name }}（{{ acc.creditBalance ?? '?' }} 积分）</option>
+              <option value="">不绑定（自动分配公共池）</option>
+              <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }} · {{ accountStatusLabel(acc.status) }} · {{ acc.creditBalance ?? '?' }} 积分</option>
             </select>
           </div>
           <div class="flex gap-3 justify-end pt-2">
@@ -1466,7 +1594,7 @@ onMounted(() => {
 
       <!-- ========== TAB: NATIVE CLI ========== -->
       <div v-if="currentTab === 'native'" class="space-y-6">
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+        <div class="bg-white shadow-sm border border-slate-200 p-6 space-y-5">
           <div class="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-5">
             <div class="max-w-2xl">
               <p class="text-xs font-black text-indigo-600 uppercase tracking-wider">简单模式</p>
@@ -1477,7 +1605,7 @@ onMounted(() => {
               <label class="block text-sm font-bold text-slate-700 mb-2">用哪个账号执行</label>
               <select v-model="nativeAccountId" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                 <option value="">请选择账号实例</option>
-                <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }} · {{ acc.status }} · {{ acc.creditBalance ?? '?' }} 积分</option>
+                <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }} · {{ accountStatusLabel(acc.status) }} · {{ acc.creditBalance ?? '?' }} 积分</option>
               </select>
             </div>
           </div>
@@ -1499,7 +1627,7 @@ onMounted(() => {
         </div>
 
         <div class="grid grid-cols-1 2xl:grid-cols-[1.05fr_.95fr] gap-6">
-          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+          <div class="bg-white shadow-sm border border-slate-200 p-6 space-y-5">
             <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
               <div>
                 <h3 class="font-black text-slate-900">1. 刷新最近任务</h3>
@@ -1535,7 +1663,7 @@ onMounted(() => {
             <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">点击“刷新最近任务”后，这里会显示 CLI 返回的任务列表。看到 submit_id 后可以复制到右侧查询最终结果。</div>
           </div>
 
-          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+          <div class="bg-white shadow-sm border border-slate-200 p-6 space-y-5">
             <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
               <div>
                 <h3 class="font-black text-slate-900">2. 查询一个结果</h3>
@@ -1569,7 +1697,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+        <div class="bg-white shadow-sm border border-slate-200 p-6 space-y-5">
           <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
             <div>
               <h3 class="font-black text-slate-900">高级：会话管理</h3>
@@ -1978,7 +2106,7 @@ curl -X POST http://&lt;server&gt;:3000/v1/videos/generations \
             <input v-model="taskFilterError" @keyup.enter="fetchTasks(1)" placeholder="搜索失败原因" class="w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
             <button @click="fetchTasks(1)" :disabled="taskLoading" class="bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">筛选</button>
             <button @click="clearTaskFilters(); fetchTasks(1)" class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 px-5 py-2.5 rounded-lg font-bold text-sm">清空</button>
-            <button @click="fetchTasks(taskPage)" :disabled="taskLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">🔄 刷新</button>
+            <button @click="fetchTasks(taskPage)" :disabled="taskLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">刷新</button>
           </div>
         </div>
 
