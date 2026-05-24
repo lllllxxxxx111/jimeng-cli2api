@@ -73,6 +73,7 @@ const nativeTaskOffset = ref(0);
 const nativeQuerySubmitId = ref('');
 const nativeQueryDownload = ref(false);
 const nativeQueryDownloadDirName = ref('');
+const nativeShowAdvancedSessions = ref(false);
 
 const currentTab = ref('accounts');
 
@@ -239,6 +240,47 @@ const nativeResultText = (result: any) => {
   if (result.parsed) parts.push(`parsed:\n${JSON.stringify(result.parsed, null, 2)}`);
   if (result.downloadDir) parts.push(`downloadDir: ${result.downloadDir}`);
   return parts.join('\n\n') || JSON.stringify(result, null, 2);
+};
+
+const nativeQuickTaskTypeOptions = [
+  { value: '', label: '全部类型' },
+  { value: 'text2image', label: '文生图' },
+  { value: 'image2image', label: '图生图' },
+  { value: 'image_upscale', label: '图片放大' },
+  { value: 'text2video', label: '文生视频' },
+  { value: 'image2video', label: '图生视频' },
+  { value: 'frames2video', label: '首尾帧视频' },
+  { value: 'multiframe2video', label: '多帧视频' },
+  { value: 'multimodal2video', label: '多模态视频' },
+];
+
+const nativeQuickStatusOptions = [
+  { value: '', label: '全部状态' },
+  { value: 'processing', label: '生成中' },
+  { value: 'success', label: '已完成' },
+  { value: 'failed', label: '失败' },
+];
+
+const nativeResultSummary = (result: any) => {
+  if (!result) return null;
+  const text = nativeResultText(result);
+  const urlMatch = text.match(/https?:\/\/[^\s"'<>)\\]+/);
+  const parsed = result.parsed || result.result || result.data || {};
+  return {
+    url: urlMatch?.[0] || '',
+    submitId: result.submit_id || result.submitId || parsed.submit_id || parsed.task_id || '',
+    raw: text,
+  };
+};
+
+const nativeCopy = async (text: string) => {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    successMessage.value = '已复制';
+  } catch (e: any) {
+    nativeError.value = e.message || '复制失败';
+  }
 };
 
 const ensureNativeAccount = () => {
@@ -1424,34 +1466,122 @@ onMounted(() => {
 
       <!-- ========== TAB: NATIVE CLI ========== -->
       <div v-if="currentTab === 'native'" class="space-y-6">
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-          <div class="grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-5 items-end">
-            <div>
-              <label class="block text-sm font-bold text-slate-700 mb-2">执行账号</label>
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+          <div class="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-5">
+            <div class="max-w-2xl">
+              <p class="text-xs font-black text-indigo-600 uppercase tracking-wider">简单模式</p>
+              <h2 class="text-2xl font-black text-slate-900 mt-1">即梦原生任务助手</h2>
+              <p class="text-sm text-slate-500 mt-2 leading-6">这里不是给你手写命令的地方。选一个账号，点刷新最近任务；拿到 submit_id 后粘到结果查询里，就能看生成结果或下载到服务器。</p>
+            </div>
+            <div class="w-full xl:w-[420px]">
+              <label class="block text-sm font-bold text-slate-700 mb-2">用哪个账号执行</label>
               <select v-model="nativeAccountId" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                 <option value="">请选择账号实例</option>
                 <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }} · {{ acc.status }} · {{ acc.creditBalance ?? '?' }} 积分</option>
               </select>
-              <p class="text-xs text-slate-400 mt-2">这些操作会在选中账号的隔离凭证下调用本机新版 dreamina CLI。</p>
             </div>
-            <div class="rounded-xl bg-slate-50 border border-slate-100 px-4 py-3">
-              <p class="text-xs font-bold text-slate-500 uppercase">当前账号</p>
-              <p class="text-sm font-black text-slate-800 mt-1">{{ selectedNativeAccountName() || '-' }}</p>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <p class="text-xs font-bold text-slate-500">当前账号</p>
+              <p class="text-sm font-black text-slate-800 mt-1">{{ selectedNativeAccountName() || '还没选择' }}</p>
+            </div>
+            <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <p class="text-xs font-bold text-slate-500">推荐动作</p>
+              <p class="text-sm font-black text-slate-800 mt-1">先点“刷新最近任务”</p>
+            </div>
+            <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <p class="text-xs font-bold text-slate-500">高级命令</p>
+              <p class="text-sm font-black text-slate-800 mt-1">会话管理已折叠</p>
             </div>
           </div>
           <div v-if="nativeError" class="mt-4 bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ nativeError }}</div>
         </div>
 
-        <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
+        <div class="grid grid-cols-1 2xl:grid-cols-[1.05fr_.95fr] gap-6">
           <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
-            <div class="flex items-center justify-between gap-3">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
               <div>
-                <h3 class="font-black text-slate-900">Session 管理</h3>
-                <p class="text-xs text-slate-400 mt-1">对齐 CLI：session list/create/search/rename/delete</p>
+                <h3 class="font-black text-slate-900">1. 刷新最近任务</h3>
+                <p class="text-xs text-slate-400 mt-1">不用记 CLI 参数。默认查最近 20 条，必要时再筛选类型或状态。</p>
               </div>
-              <button @click="fetchNativeSessions" :disabled="nativeLoading === 'sessions'" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg font-bold text-sm">刷新会话</button>
+              <button @click="fetchNativeTasks" :disabled="nativeLoading === 'tasks'" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-black">{{ nativeLoading === 'tasks' ? '查询中...' : '刷新最近任务' }}</button>
             </div>
 
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <select v-model="nativeTaskStatus" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                <option v-for="item in nativeQuickStatusOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+              </select>
+              <select v-model="nativeTaskType" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                <option v-for="item in nativeQuickTaskTypeOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+              </select>
+              <input v-model.trim="nativeTaskSubmitId" class="md:col-span-2 border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="有 submit_id 时可直接筛选" />
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <label class="text-xs font-bold text-slate-500">每次显示</label>
+              <input v-model.number="nativeTaskLimit" type="number" min="1" max="100" class="w-24 border border-slate-300 px-3 py-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+              <label class="text-xs font-bold text-slate-500">跳过</label>
+              <input v-model.number="nativeTaskOffset" type="number" min="0" class="w-24 border border-slate-300 px-3 py-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+            </div>
+
+            <div v-if="nativeTasksResult" class="rounded-xl border border-slate-200 overflow-hidden">
+              <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                <p class="text-sm font-black text-slate-800">查询结果</p>
+                <button @click="nativeCopy(nativeResultText(nativeTasksResult))" class="text-xs font-bold text-indigo-600 hover:text-indigo-800">复制原始结果</button>
+              </div>
+              <pre class="bg-slate-950 text-slate-200 p-4 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeTasksResult) }}</pre>
+            </div>
+            <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">点击“刷新最近任务”后，这里会显示 CLI 返回的任务列表。看到 submit_id 后可以复制到右侧查询最终结果。</div>
+          </div>
+
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+              <div>
+                <h3 class="font-black text-slate-900">2. 查询一个结果</h3>
+                <p class="text-xs text-slate-400 mt-1">把任务里的 submit_id 粘进来。勾选下载后，结果保存到服务端 data/downloads 子目录。</p>
+              </div>
+              <button @click="queryNativeResult" :disabled="nativeLoading === 'query'" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-black">{{ nativeLoading === 'query' ? '查询中...' : '查询结果' }}</button>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto_220px] gap-3 items-center">
+              <input v-model.trim="nativeQuerySubmitId" class="border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="粘贴 submit_id" />
+              <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 bg-slate-50 border border-slate-100 px-4 py-3 rounded-xl">
+                <input v-model="nativeQueryDownload" type="checkbox" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+                下载结果
+              </label>
+              <input v-model.trim="nativeQueryDownloadDirName" :disabled="!nativeQueryDownload" class="border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50" placeholder="目录名，可不填" />
+            </div>
+
+            <div v-if="nativeResultSummary(nativeQueryResult)" class="rounded-xl border border-slate-200 overflow-hidden">
+              <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                <p class="text-sm font-black text-slate-800">最终结果</p>
+                <div class="flex flex-wrap gap-2">
+                  <button v-if="nativeResultSummary(nativeQueryResult)?.url" @click="nativeCopy(nativeResultSummary(nativeQueryResult)?.url || '')" class="text-xs font-bold text-indigo-600 bg-white border border-indigo-100 px-3 py-1.5 rounded-lg">复制链接</button>
+                  <a v-if="nativeResultSummary(nativeQueryResult)?.url" :href="nativeResultSummary(nativeQueryResult)?.url" target="_blank" class="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-lg">打开结果</a>
+                  <button @click="nativeCopy(nativeResultText(nativeQueryResult))" class="text-xs font-bold text-slate-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg">复制全部</button>
+                </div>
+              </div>
+              <div v-if="nativeResultSummary(nativeQueryResult)?.url" class="px-4 py-3 bg-emerald-50 border-b border-emerald-100 text-xs text-emerald-800 break-all">{{ nativeResultSummary(nativeQueryResult)?.url }}</div>
+              <pre class="bg-slate-950 text-slate-200 p-4 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeQueryResult) }}</pre>
+            </div>
+            <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">这里会显示 query_result 的最终链接、下载目录和原始返回。没有 submit_id 时先刷新左侧最近任务。</div>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <div>
+              <h3 class="font-black text-slate-900">高级：会话管理</h3>
+              <p class="text-xs text-slate-400 mt-1">一般不用动。只有需要隔离历史、重命名会话或清理会话时再打开。</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button @click="fetchNativeSessions" :disabled="nativeLoading === 'sessions'" class="bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 px-4 py-2 rounded-lg font-bold text-sm">刷新会话</button>
+              <button @click="nativeShowAdvancedSessions = !nativeShowAdvancedSessions" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg font-bold text-sm">{{ nativeShowAdvancedSessions ? '收起' : '展开高级操作' }}</button>
+            </div>
+          </div>
+
+          <div v-if="nativeShowAdvancedSessions" class="space-y-4">
             <div class="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-3">
               <input v-model.number="nativeSessionMaxCount" type="number" min="1" max="100" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="列表数量" />
               <div class="flex gap-3">
@@ -1459,57 +1589,19 @@ onMounted(() => {
                 <button @click="createNativeSession" :disabled="nativeLoading === 'session-create'" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-4 py-2.5 rounded-lg text-sm font-bold">创建</button>
               </div>
             </div>
-
             <div class="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
               <input v-model.trim="nativeSessionSearchName" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="按会话名搜索" />
               <button @click="searchNativeSession" :disabled="nativeLoading === 'session-search'" class="bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold">搜索</button>
             </div>
-
             <div class="grid grid-cols-1 md:grid-cols-[130px_1fr_auto_auto] gap-3">
               <input v-model.trim="nativeSessionId" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="会话 ID" />
               <input v-model.trim="nativeSessionNewName" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="新名称" />
               <button @click="renameNativeSession" :disabled="nativeLoading === 'session-rename'" class="bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 px-4 py-2.5 rounded-lg text-sm font-bold">重命名</button>
               <button @click="deleteNativeSession" :disabled="nativeLoading === 'session-delete'" class="bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-600 px-4 py-2.5 rounded-lg text-sm font-bold">删除</button>
             </div>
-
-            <pre class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[180px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeSessionsResult) || '等待执行 session 命令...' }}</pre>
           </div>
 
-          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
-            <div>
-              <h3 class="font-black text-slate-900">CLI 任务列表</h3>
-              <p class="text-xs text-slate-400 mt-1">直接调用 list_task，可按原生状态、任务类型和 submit_id 过滤。</p>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <input v-model.trim="nativeTaskStatus" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="gen_status，如 success" />
-              <input v-model.trim="nativeTaskType" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="gen_task_type，如 text2image" />
-              <input v-model.trim="nativeTaskSubmitId" class="md:col-span-2 border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="submit_id，可选" />
-              <input v-model.number="nativeTaskLimit" type="number" min="1" max="100" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="limit" />
-              <input v-model.number="nativeTaskOffset" type="number" min="0" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="offset" />
-            </div>
-            <button @click="fetchNativeTasks" :disabled="nativeLoading === 'tasks'" class="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl text-sm font-black">查询 CLI 任务</button>
-            <pre class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[220px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeTasksResult) || '等待执行 list_task...' }}</pre>
-          </div>
-        </div>
-
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-5">
-          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-            <div>
-              <h3 class="font-black text-slate-900">原生结果查询</h3>
-              <p class="text-xs text-slate-400 mt-1">直接调用 query_result。勾选下载时只允许保存到服务端 data/downloads 子目录。</p>
-            </div>
-            <button @click="queryNativeResult" :disabled="nativeLoading === 'query'" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-black">查询结果</button>
-          </div>
-          <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto_260px] gap-3 items-center">
-            <input v-model.trim="nativeQuerySubmitId" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="submit_id" />
-            <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600">
-              <input v-model="nativeQueryDownload" type="checkbox" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
-              下载结果
-            </label>
-            <input v-model.trim="nativeQueryDownloadDirName" :disabled="!nativeQueryDownload" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50" placeholder="下载目录名，可选" />
-          </div>
-          <pre class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[220px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeQueryResult) || '等待执行 query_result...' }}</pre>
+          <pre v-if="nativeSessionsResult" class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[180px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeSessionsResult) }}</pre>
         </div>
       </div>
 
