@@ -12,6 +12,14 @@ const multer_1 = __importDefault(require("multer"));
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 const upload = (0, multer_1.default)({ storage: multer_1.default.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+function buildSessionParam(raw) {
+    if (raw === undefined || raw === null || raw === '')
+        return '';
+    const session = Number(raw);
+    if (!Number.isInteger(session) || session < 0)
+        throw new Error('session must be a non-negative integer');
+    return `--session=${session}`;
+}
 const apiKeyAuth = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer '))
@@ -109,7 +117,8 @@ router.post('/jimeng/image2video', apiKeyAuth, upload.single('image'), async (re
         }
         if (!tempFilePath)
             return res.status(400).json({ error: { message: "An input image is required for image2video" } });
-        const cmdBuilder = (localPath) => `dreamina image2video --image "${localPath}" --prompt="${prompt}" --duration=5 --poll=0`;
+        const sessionParam = buildSessionParam(req.body.session);
+        const cmdBuilder = (localPath) => `dreamina image2video --image "${localPath}" --prompt="${prompt}" --duration=5 ${sessionParam} --poll=0`;
         return await dispatchJimengTask(req, res, 'image2video', cmdBuilder, tempFilePath);
     }
     catch (err) {

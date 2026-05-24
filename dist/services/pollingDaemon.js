@@ -61,28 +61,75 @@ function extractJsonPayload(stdout) {
     }
     return null;
 }
+function parseMaybeJson(value) {
+    if (typeof value !== 'string')
+        return value;
+    const text = value.trim();
+    if (!text || (text[0] !== '{' && text[0] !== '['))
+        return value;
+    try {
+        return JSON.parse(text);
+    }
+    catch {
+        return value;
+    }
+}
+function collectUrls(value, out = [], seen = new Set(), depth = 0) {
+    if (value === null || value === undefined || depth > 10)
+        return out;
+    if (typeof value === 'string') {
+        const matches = value.match(/https?:\/\/[^\s"'<>\\]+/g);
+        if (matches)
+            out.push(...matches);
+        return out;
+    }
+    if (typeof value !== 'object')
+        return out;
+    if (seen.has(value))
+        return out;
+    seen.add(value);
+    if (Array.isArray(value)) {
+        for (const item of value)
+            collectUrls(item, out, seen, depth + 1);
+        return out;
+    }
+    for (const item of Object.values(value)) {
+        collectUrls(item, out, seen, depth + 1);
+    }
+    return out;
+}
+function isImageTask(taskType) {
+    return taskType === 'image2image' || taskType === 'text2image' || taskType === 'image_upscale';
+}
+function extractFinalUrl(item, taskType) {
+    const resultJson = parseMaybeJson(item.result_json);
+    const searchableItem = { ...item, request: undefined, result_json: resultJson };
+    const urls = [
+        ...collectUrls(resultJson),
+        ...collectUrls(item.result),
+        ...collectUrls(item.data),
+        ...collectUrls(item.item_list),
+        ...collectUrls(searchableItem),
+    ];
+    const uniqueUrls = Array.from(new Set(urls));
+    if (uniqueUrls.length === 0)
+        return null;
+    const image = isImageTask(taskType);
+    const mediaPattern = image
+        ? /\.(png|jpe?g|webp|gif|bmp|tiff?)(?:[?&#]|$)/i
+        : /\.(mp4|mov|m4v|webm|m3u8)(?:[?&#]|$)/i;
+    return uniqueUrls.find(url => mediaPattern.test(url))
+        || uniqueUrls.find(url => image ? /image/i.test(url) : /video/i.test(url))
+        || uniqueUrls[0];
+}
 function normalizeTaskState(payload, taskType) {
     const item = Array.isArray(payload) ? payload[0] : payload;
     if (!item || typeof item !== 'object')
         return null;
-    const rawStatus = String(item.gen_status ?? item.status ?? item.task_status ?? '').toLowerCase();
+    const rawStatus = String(item.gen_status ?? item.status ?? item.task_status ?? item.task?.status ?? '').toLowerCase();
     const isProcessing = ['pending', 'processing', 'running', 'queueing', 'queued', 'submitted', 'querying'].includes(rawStatus);
-    const isFailed = ['failed', 'fail', 'error'].includes(rawStatus) || item.status === 2;
-    let finalUrl = null;
-    if (taskType === 'image2image' || taskType === 'text2image' || taskType === 'image_upscale') {
-        finalUrl = item.result_json?.images?.[0]?.image_url
-            || item.result_json?.images?.[0]?.url
-            || item.result?.images?.[0]?.image_url
-            || item.image_url
-            || item.url;
-    }
-    else {
-        finalUrl = item.result_json?.videos?.[0]?.video_url
-            || item.result_json?.videos?.[0]?.url
-            || item.result?.videos?.[0]?.video_url
-            || item.video_url
-            || item.url;
-    }
+    const isFailed = ['failed', 'fail', 'error'].includes(rawStatus) || item.status === 2 || item.task?.status === 2;
+    const finalUrl = extractFinalUrl(item, taskType);
     return { rawStatus, isProcessing, isFailed, finalUrl, item };
 }
 exports.pollingDaemon = {
