@@ -54,6 +54,8 @@ type DispatchResult = {
   submit_id: string;
   task_type: string;
   model: string | null;
+  command?: string;
+  dry_run?: boolean;
 };
 
 type ModelAliasKind = 'image' | 'video' | 'video_frames' | 'video_multimodal' | 'video_keyframes' | 'upscale';
@@ -1117,20 +1119,27 @@ const buildResponseObject = (task: any) => {
   return response;
 };
 
-const buildResponseObjectFromDispatch = (result: DispatchResult) => ({
-  id: `resp_${result.id}`,
-  object: 'response',
-  created_at: Math.floor(Date.now() / 1000),
-  status: 'in_progress',
-  model: result.model || result.task_type,
-  output: [],
-  output_text: '',
-  metadata: {
-    task_id: result.id,
-    submit_id: result.submit_id,
-    task_type: result.task_type,
-  },
-});
+const buildResponseObjectFromDispatch = (result: DispatchResult) => {
+  const response: any = {
+    id: `resp_${result.id}`,
+    object: 'response',
+    created_at: Math.floor(Date.now() / 1000),
+    status: result.dry_run ? 'completed' : 'in_progress',
+    model: result.model || result.task_type,
+    output: [],
+    output_text: '',
+    metadata: {
+      task_id: result.id,
+      submit_id: result.submit_id,
+      task_type: result.task_type,
+    },
+  };
+  if (result.dry_run) {
+    response.metadata.dry_run = true;
+    response.metadata.command = result.command;
+  }
+  return response;
+};
 
 const buildOpenAIVideoObject = (task: any) => {
   const status = mapTaskStatusToOpenAIVideoStatus(task.status);
@@ -1168,22 +1177,29 @@ const buildOpenAIVideoObject = (task: any) => {
   return response;
 };
 
-const buildOpenAIVideoObjectFromDispatch = (result: DispatchResult) => ({
-  id: `video_${result.id}`,
-  object: 'video',
-  created_at: Math.floor(Date.now() / 1000),
-  status: 'queued',
-  model: result.model || result.task_type,
-  progress: 0,
-  seconds: null,
-  size: null,
-  metadata: {
-    task_id: result.id,
-    submit_id: result.submit_id,
-    task_type: result.task_type,
-    dreamina_model: result.model,
-  },
-});
+const buildOpenAIVideoObjectFromDispatch = (result: DispatchResult) => {
+  const response: any = {
+    id: `video_${result.id}`,
+    object: 'video',
+    created_at: Math.floor(Date.now() / 1000),
+    status: result.dry_run ? 'completed' : 'queued',
+    model: result.model || result.task_type,
+    progress: result.dry_run ? 100 : 0,
+    seconds: null,
+    size: null,
+    metadata: {
+      task_id: result.id,
+      submit_id: result.submit_id,
+      task_type: result.task_type,
+      dreamina_model: result.model,
+    },
+  };
+  if (result.dry_run) {
+    response.metadata.dry_run = true;
+    response.metadata.command = result.command;
+  }
+  return response;
+};
 
 const collectResponsesFiles = async (req: Request, body: any): Promise<{
   filesMap: Record<RefType, Express.Multer.File[]>;
@@ -1318,6 +1334,11 @@ const getVideoTaskByPublicId = async (req: Request, rawId: string) => {
   return task;
 };
 
+const isDryRunRequest = (req: Request) => {
+  const headerValue = String(req.headers['x-jimeng-dry-run'] || '').toLowerCase();
+  const queryValue = String(req.query.dry_run ?? '').toLowerCase();
+  return headerValue === '1' || headerValue === 'true' || queryValue === '1' || queryValue === 'true';
+};
 
 const dispatchQueuedTask = async (
   req: Request,
@@ -1330,6 +1351,18 @@ const dispatchQueuedTask = async (
 ): Promise<DispatchResult> => {
   let account: any = null;
   try {
+    if (isDryRunRequest(req)) {
+      return {
+        id: `dry_${randomUUID()}`,
+        status: 'processing',
+        submit_id: 'dry_run',
+        task_type: options.type,
+        model: options.model,
+        command: options.command,
+        dry_run: true,
+      };
+    }
+
     account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
     if (!account) {
       throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
@@ -1823,16 +1856,32 @@ router.get('/videos/:id/content', apiKeyAuth, async (req: Request, res: Response
 router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async (req: Request, res: Response) => {
   try {
     const files = (req.files as Express.Multer.File[] | undefined) || [];
-    const result = await dispatchImageTask(req, req.body, files);
-    return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+    const result = await dispatchImageTask(req, req.body || {}, files);
+    return res.json({
+      id: result.id,
+      status: result.status,
+      submit_id: result.submit_id,
+      dry_run: result.dry_run,
+      command: result.command,
+      task_type: result.task_type,
+      model: result.model,
+    });
   } catch (err: any) {
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }
 });
 router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: Request, res: Response) => {
   try {
-    const result = await dispatchUpscaleTask(req, req.body, req.file as Express.Multer.File | undefined);
-    return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+    const result = await dispatchUpscaleTask(req, req.body || {}, req.file as Express.Multer.File | undefined);
+    return res.json({
+      id: result.id,
+      status: result.status,
+      submit_id: result.submit_id,
+      dry_run: result.dry_run,
+      command: result.command,
+      task_type: result.task_type,
+      model: result.model,
+    });
   } catch (err: any) {
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }
@@ -1840,8 +1889,16 @@ router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: R
 router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request, res: Response) => {
   try {
     const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
-    const result = await dispatchVideoTask(req, req.body, filesMap);
-    return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+    const result = await dispatchVideoTask(req, req.body || {}, filesMap);
+    return res.json({
+      id: result.id,
+      status: result.status,
+      submit_id: result.submit_id,
+      dry_run: result.dry_run,
+      command: result.command,
+      task_type: result.task_type,
+      model: result.model,
+    });
   } catch (err: any) {
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }

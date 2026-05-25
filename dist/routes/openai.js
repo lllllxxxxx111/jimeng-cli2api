@@ -1031,20 +1031,27 @@ const buildResponseObject = (task) => {
     }
     return response;
 };
-const buildResponseObjectFromDispatch = (result) => ({
-    id: `resp_${result.id}`,
-    object: 'response',
-    created_at: Math.floor(Date.now() / 1000),
-    status: 'in_progress',
-    model: result.model || result.task_type,
-    output: [],
-    output_text: '',
-    metadata: {
-        task_id: result.id,
-        submit_id: result.submit_id,
-        task_type: result.task_type,
-    },
-});
+const buildResponseObjectFromDispatch = (result) => {
+    const response = {
+        id: `resp_${result.id}`,
+        object: 'response',
+        created_at: Math.floor(Date.now() / 1000),
+        status: result.dry_run ? 'completed' : 'in_progress',
+        model: result.model || result.task_type,
+        output: [],
+        output_text: '',
+        metadata: {
+            task_id: result.id,
+            submit_id: result.submit_id,
+            task_type: result.task_type,
+        },
+    };
+    if (result.dry_run) {
+        response.metadata.dry_run = true;
+        response.metadata.command = result.command;
+    }
+    return response;
+};
 const buildOpenAIVideoObject = (task) => {
     const status = mapTaskStatusToOpenAIVideoStatus(task.status);
     const createdAt = Math.floor(new Date(task.createdAt).getTime() / 1000);
@@ -1079,22 +1086,29 @@ const buildOpenAIVideoObject = (task) => {
     }
     return response;
 };
-const buildOpenAIVideoObjectFromDispatch = (result) => ({
-    id: `video_${result.id}`,
-    object: 'video',
-    created_at: Math.floor(Date.now() / 1000),
-    status: 'queued',
-    model: result.model || result.task_type,
-    progress: 0,
-    seconds: null,
-    size: null,
-    metadata: {
-        task_id: result.id,
-        submit_id: result.submit_id,
-        task_type: result.task_type,
-        dreamina_model: result.model,
-    },
-});
+const buildOpenAIVideoObjectFromDispatch = (result) => {
+    const response = {
+        id: `video_${result.id}`,
+        object: 'video',
+        created_at: Math.floor(Date.now() / 1000),
+        status: result.dry_run ? 'completed' : 'queued',
+        model: result.model || result.task_type,
+        progress: result.dry_run ? 100 : 0,
+        seconds: null,
+        size: null,
+        metadata: {
+            task_id: result.id,
+            submit_id: result.submit_id,
+            task_type: result.task_type,
+            dreamina_model: result.model,
+        },
+    };
+    if (result.dry_run) {
+        response.metadata.dry_run = true;
+        response.metadata.command = result.command;
+    }
+    return response;
+};
 const collectResponsesFiles = async (req, body) => {
     const uploaded = req.files;
     const { filesMap, files } = normalizeUploadedMediaFiles(uploaded);
@@ -1212,9 +1226,25 @@ const getVideoTaskByPublicId = async (req, rawId) => {
     }
     return task;
 };
+const isDryRunRequest = (req) => {
+    const headerValue = String(req.headers['x-jimeng-dry-run'] || '').toLowerCase();
+    const queryValue = String(req.query.dry_run ?? '').toLowerCase();
+    return headerValue === '1' || headerValue === 'true' || queryValue === '1' || queryValue === 'true';
+};
 const dispatchQueuedTask = async (req, options) => {
     let account = null;
     try {
+        if (isDryRunRequest(req)) {
+            return {
+                id: `dry_${(0, crypto_1.randomUUID)()}`,
+                status: 'processing',
+                submit_id: 'dry_run',
+                task_type: options.type,
+                model: options.model,
+                command: options.command,
+                dry_run: true,
+            };
+        }
         account = await accountService_1.accountService.getIdleAccount(req.apiBoundAccountId);
         if (!account) {
             throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
@@ -1717,8 +1747,16 @@ router.get('/videos/:id/content', apiKeyAuth, async (req, res) => {
 router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async (req, res) => {
     try {
         const files = req.files || [];
-        const result = await dispatchImageTask(req, req.body, files);
-        return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+        const result = await dispatchImageTask(req, req.body || {}, files);
+        return res.json({
+            id: result.id,
+            status: result.status,
+            submit_id: result.submit_id,
+            dry_run: result.dry_run,
+            command: result.command,
+            task_type: result.task_type,
+            model: result.model,
+        });
     }
     catch (err) {
         return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
@@ -1726,8 +1764,16 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
 });
 router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req, res) => {
     try {
-        const result = await dispatchUpscaleTask(req, req.body, req.file);
-        return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+        const result = await dispatchUpscaleTask(req, req.body || {}, req.file);
+        return res.json({
+            id: result.id,
+            status: result.status,
+            submit_id: result.submit_id,
+            dry_run: result.dry_run,
+            command: result.command,
+            task_type: result.task_type,
+            model: result.model,
+        });
     }
     catch (err) {
         return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
@@ -1736,8 +1782,16 @@ router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req, r
 router.post('/videos/generations', apiKeyAuth, upload.any(), async (req, res) => {
     try {
         const { filesMap } = normalizeUploadedMediaFiles(req.files);
-        const result = await dispatchVideoTask(req, req.body, filesMap);
-        return res.json({ id: result.id, status: result.status, submit_id: result.submit_id });
+        const result = await dispatchVideoTask(req, req.body || {}, filesMap);
+        return res.json({
+            id: result.id,
+            status: result.status,
+            submit_id: result.submit_id,
+            dry_run: result.dry_run,
+            command: result.command,
+            task_type: result.task_type,
+            model: result.model,
+        });
     }
     catch (err) {
         return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
