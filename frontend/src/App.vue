@@ -78,8 +78,8 @@ const sdkApiKey = ref(localStorage.getItem('sdk_test_api_key') || '');
 const sdkSelectedKeyId = ref('');
 const sdkMode = ref('models');
 const sdkPrompt = ref('一只赛博朋克机械猫，电影感灯光，细节丰富');
-const sdkImageModel = ref('5.0');
-const sdkVideoModel = ref('sora-2');
+const sdkImageModel = ref('jimeng-image-5.0');
+const sdkVideoModel = ref('jimeng-video-seedance2.0fast');
 const sdkRatio = ref('16:9');
 const sdkResolution = ref('2k');
 const sdkVideoSize = ref('1280x720');
@@ -461,6 +461,34 @@ const parseSdkSession = () => {
   return session;
 };
 
+const sdkModelOptions = {
+  image: ['3.0', '3.1', '4.0', '4.1', '4.5', '4.6', '5.0'].map(model => ({
+    value: `jimeng-image-${model}`,
+    label: `jimeng-image-${model}`,
+  })),
+  video: ['seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
+    value: `jimeng-video-${model}`,
+    label: `jimeng-video-${model}`,
+  })),
+  frames: ['3.0', '3.5pro', 'seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
+    value: `jimeng-video-frames-${model}`,
+    label: `jimeng-video-frames-${model}`,
+  })),
+  multimodal: ['seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
+    value: `jimeng-video-multimodal-${model}`,
+    label: `jimeng-video-multimodal-${model}`,
+  })),
+  keyframes: [{ value: 'jimeng-video-keyframes', label: 'jimeng-video-keyframes' }],
+};
+
+const sdkVideoModelOptions = () => {
+  return [...sdkModelOptions.video, ...sdkModelOptions.frames, ...sdkModelOptions.multimodal, ...sdkModelOptions.keyframes];
+};
+
+const preferredSdkModels = (models: any[]) => models.filter((item: any) => String(item.id || '').startsWith('jimeng-'));
+
+const legacySdkModels = (models: any[]) => models.filter((item: any) => !String(item.id || '').startsWith('jimeng-'));
+
 const sdkEndpoint = () => {
   if (sdkMode.value === 'models') return { method: 'GET', path: '/v1/models', contentType: 'json' };
   if (sdkMode.value === 'responses-image' || sdkMode.value === 'responses-video') return { method: 'POST', path: '/v1/responses', contentType: 'json' };
@@ -495,7 +523,6 @@ const buildSdkPayload = () => {
       model: sdkVideoModel.value,
       input: sdkPrompt.value,
       metadata: {
-        operation: 'text2video',
         duration: Number(sdkVideoSeconds.value) || 5,
         ratio: sdkRatio.value,
         video_resolution: sdkVideoResolution.value || undefined,
@@ -565,23 +592,25 @@ const sdkResponseSummary = (value: any) => {
 
   if (value.object === 'list' && Array.isArray(value.data)) {
     const capabilities = Array.from(new Set(value.data.flatMap((item: any) => Array.isArray(item.capabilities) ? item.capabilities : []))).sort();
-    const models = value.data
-      .map((item: any) => item.id === 'image_upscale' ? 'image_upscale (放大入口)' : item.id)
+    const preferredModels = preferredSdkModels(value.data).map((item: any) => item.id).filter(Boolean);
+    const legacyModels = legacySdkModels(value.data)
+      .map((item: any) => item.id === 'image_upscale' ? 'image_upscale (兼容旧入口)' : item.id)
       .filter(Boolean);
     const globalCapabilities = Object.entries(value.global_capabilities || {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([name]) => name);
     return {
       title: '模型列表返回成功',
-      subtitle: '功能能力和模型版本已分开展示，完整 JSON 可以展开或复制。',
+      subtitle: '推荐使用 jimeng-* 模型；旧模型 ID 仍保留兼容。',
       stats: [
-        { label: '模型数量', value: value.data.length },
+        { label: '推荐模型', value: preferredModels.length },
+        { label: '兼容旧模型', value: legacyModels.length },
         { label: '能力数量', value: capabilities.length },
-        { label: '全局能力', value: globalCapabilities.length || '-' },
       ],
       groups: [
+        { label: '推荐模型', items: preferredModels },
+        { label: '兼容旧模型', items: legacyModels },
         { label: '功能能力', items: capabilities },
-        { label: '模型版本', items: models },
         ...(globalCapabilities.length ? [{ label: '全局能力', items: globalCapabilities }] : []),
       ] as SdkSummaryGroup[],
     };
@@ -2246,25 +2275,15 @@ onMounted(() => {
                 <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">图片模型</label>
                   <select v-model="sdkImageModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option value="5.0">5.0</option>
-                    <option value="4.6">4.6</option>
-                    <option value="4.5">4.5</option>
-                    <option value="4.1">4.1</option>
-                    <option value="4.0">4.0</option>
-                    <option value="3.1">3.1</option>
-                    <option value="3.0">3.0</option>
+                    <option v-for="model in sdkModelOptions.image" :key="model.value" :value="model.value">{{ model.label }}</option>
                   </select>
                 </div>
                 <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">视频模型</label>
                   <select v-model="sdkVideoModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option value="sora-2">sora-2 → seedance2.0fast</option>
-                    <option value="sora-2-pro">sora-2-pro → seedance2.0_vip</option>
-                    <option value="seedance2.0fast">seedance2.0fast</option>
-                    <option value="seedance2.0">seedance2.0</option>
-                    <option value="seedance2.0_vip">seedance2.0_vip</option>
-                    <option value="seedance2.0fast_vip">seedance2.0fast_vip</option>
+                    <option v-for="model in sdkVideoModelOptions()" :key="model.value" :value="model.value">{{ model.label }}</option>
                   </select>
+                  <p class="text-xs text-slate-400 mt-2">普通视频模型：两张或多张参考图按多图/多模态处理；frames 模型：两张图固定为首尾帧。</p>
                 </div>
                 <div>
                   <label class="block text-sm font-bold text-slate-700 mb-2">比例</label>

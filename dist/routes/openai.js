@@ -117,6 +117,11 @@ const RATIO_TO_OPENAI_VIDEO_SIZE = {
     '16:9': '1280x720',
     '21:9': '1792x768',
 };
+const UPSCALE_ALIAS_TO_RESOLUTION = {
+    'jimeng-upscale-2k': '2k',
+    'jimeng-upscale-4k': '4k',
+    'jimeng-upscale-8k': '8k',
+};
 const getFirstBodyValue = (value) => {
     const raw = Array.isArray(value) ? value[0] : value;
     if (raw === undefined || raw === null)
@@ -388,22 +393,181 @@ const getModelParameters = (id) => {
         parameters.multimodal2video = getVideoModeParameters('multimodal2video', id);
     return parameters;
 };
-const GLOBAL_MODE_PARAMETERS = {
-    multiframe2video: {
-        images: { min: 2, max: 20, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
-        exactly_two_images: {
-            prompt: { required: true },
-            duration: { min: 0.5, max: 8, unit: 'seconds', default: 3 },
-        },
-        three_or_more_images: {
-            transition_prompt: { count: 'images.length - 1', required: true },
-            transition_duration: { count: 'images.length - 1', min: 0.5, max: 8, unit: 'seconds', default: 3 },
-            total_duration: { min: 2, unit: 'seconds' },
-        },
-        unsupported: ['model_version', 'video_resolution', 'ratio'],
-        ratio: 'inferred_from_first_image',
-        session: { type: 'integer', min: 0 },
+const getMultiframeParameters = () => ({
+    images: { min: 2, max: 20, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+    exactly_two_images: {
+        prompt: { required: true },
+        duration: { min: 0.5, max: 8, unit: 'seconds', default: 3 },
     },
+    three_or_more_images: {
+        transition_prompt: { count: 'images.length - 1', required: true },
+        transition_duration: { count: 'images.length - 1', min: 0.5, max: 8, unit: 'seconds', default: 3 },
+        total_duration: { min: 2, unit: 'seconds' },
+    },
+    unsupported: ['model_version', 'video_resolution', 'ratio'],
+    ratio: 'inferred_from_first_image',
+    session: { type: 'integer', min: 0 },
+});
+const buildModelAliases = () => {
+    const imageAliases = IMAGE_MODELS.map((model) => {
+        const capabilities = ['text2image'];
+        if (IMAGE2IMAGE_MODELS.has(model))
+            capabilities.push('image2image');
+        return {
+            id: `jimeng-image-${model}`,
+            object: 'model',
+            created: 0,
+            owned_by: 'dreamina',
+            kind: 'image',
+            cli_model: model,
+            capabilities,
+            default_mode: 'text2image',
+            description: `Jimeng image model ${model}`,
+            parameters: getImageParameters(model),
+        };
+    });
+    const videoModels = Array.from(new Set([
+        ...Array.from(TEXT2VIDEO_MODELS),
+        ...Array.from(IMAGE2VIDEO_MODELS),
+        ...Array.from(FRAMES2VIDEO_MODELS),
+        ...Array.from(MULTIMODAL_MODELS),
+    ])).sort();
+    const videoAliases = videoModels.flatMap((model) => {
+        const capabilities = [];
+        if (TEXT2VIDEO_MODELS.has(model))
+            capabilities.push('text2video');
+        if (IMAGE2VIDEO_MODELS.has(model))
+            capabilities.push('image2video');
+        if (MULTIMODAL_MODELS.has(model))
+            capabilities.push('multimodal2video');
+        const aliases = [];
+        if (capabilities.length > 0) {
+            aliases.push({
+                id: `jimeng-video-${model}`,
+                object: 'model',
+                created: 0,
+                owned_by: 'dreamina',
+                kind: 'video',
+                cli_model: model,
+                capabilities,
+                default_mode: 'auto',
+                description: `Jimeng video model ${model}; text, single-image, and multimodal references are inferred from input.`,
+                parameters: Object.fromEntries(capabilities.map(mode => [mode, getVideoModeParameters(mode, model)])),
+            });
+        }
+        if (FRAMES2VIDEO_MODELS.has(model)) {
+            aliases.push({
+                id: `jimeng-video-frames-${model}`,
+                object: 'model',
+                created: 0,
+                owned_by: 'dreamina',
+                kind: 'video_frames',
+                cli_model: model,
+                capabilities: ['frames2video'],
+                default_mode: 'frames2video',
+                description: `Jimeng first/last-frame video model ${model}; exactly two images are required.`,
+                parameters: { frames2video: getVideoModeParameters('frames2video', model) },
+            });
+        }
+        if (MULTIMODAL_MODELS.has(model)) {
+            aliases.push({
+                id: `jimeng-video-multimodal-${model}`,
+                object: 'model',
+                created: 0,
+                owned_by: 'dreamina',
+                kind: 'video_multimodal',
+                cli_model: model,
+                capabilities: ['multimodal2video'],
+                default_mode: 'multimodal2video',
+                description: `Jimeng multimodal video model ${model}; images, videos, and optional audio are accepted.`,
+                parameters: { multimodal2video: getVideoModeParameters('multimodal2video', model) },
+            });
+        }
+        return aliases;
+    });
+    const upscaleAliases = Object.entries(UPSCALE_ALIAS_TO_RESOLUTION).map(([id, resolution]) => ({
+        id,
+        object: 'model',
+        created: 0,
+        owned_by: 'dreamina',
+        kind: 'upscale',
+        cli_model: 'image_upscale',
+        capabilities: ['image_upscale'],
+        default_mode: 'image_upscale',
+        description: `Jimeng image upscale to ${resolution}`,
+        parameters: {
+            image_upscale: {
+                image: { min: 1, max: 1, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
+                resolution_type: [resolution],
+                session: { type: 'integer', min: 0 },
+            },
+        },
+    }));
+    const keyframeAlias = {
+        id: 'jimeng-video-keyframes',
+        object: 'model',
+        created: 0,
+        owned_by: 'dreamina',
+        kind: 'video_keyframes',
+        cli_model: null,
+        capabilities: ['multiframe2video'],
+        default_mode: 'multiframe2video',
+        description: 'Jimeng multi-keyframe video; accepts 2 to 20 images and does not use model_version.',
+        parameters: { multiframe2video: getMultiframeParameters() },
+    };
+    return [...imageAliases, ...videoAliases, keyframeAlias, ...upscaleAliases];
+};
+const MODEL_ALIASES = buildModelAliases();
+const MODEL_ALIAS_BY_ID = new Map(MODEL_ALIASES.map(alias => [alias.id, alias]));
+const legacyModelEntry = (id, capabilities) => ({
+    id,
+    object: 'model',
+    created: 0,
+    owned_by: 'dreamina',
+    capabilities: Array.from(capabilities),
+    parameters: getModelParameters(id),
+    legacy: true,
+});
+const publicModelList = () => ([
+    ...MODEL_ALIASES,
+    ...Array.from(MODEL_CAPABILITIES.entries()).map(([id, capabilities]) => legacyModelEntry(id, capabilities)),
+]);
+const parseJimengModelAlias = (raw) => {
+    const id = getFirstBodyValue(raw);
+    if (!id)
+        return null;
+    return MODEL_ALIAS_BY_ID.get(id) || null;
+};
+const resolveImageModelAlias = (raw) => {
+    const alias = parseJimengModelAlias(raw);
+    if (!alias)
+        return null;
+    if (alias.kind !== 'image') {
+        throw httpError(400, `model ${alias.id} is not an image generation model. Use a jimeng-image-* model.`);
+    }
+    return alias;
+};
+const resolveVideoModelAlias = (raw) => {
+    const alias = parseJimengModelAlias(raw);
+    if (!alias)
+        return null;
+    if (alias.kind !== 'video' && alias.kind !== 'video_frames' && alias.kind !== 'video_multimodal' && alias.kind !== 'video_keyframes') {
+        throw httpError(400, `model ${alias.id} is not a video generation model. Use a jimeng-video-* model.`);
+    }
+    return alias;
+};
+const resolveUpscaleModelAlias = (raw) => {
+    const alias = parseJimengModelAlias(raw);
+    if (!alias)
+        return null;
+    if (alias.kind !== 'upscale') {
+        throw httpError(400, `model ${alias.id} is not an upscale model. Use a jimeng-upscale-* model.`);
+    }
+    return alias;
+};
+const aliasDefaultMode = (alias) => alias?.default_mode;
+const GLOBAL_MODE_PARAMETERS = {
+    multiframe2video: getMultiframeParameters(),
 };
 const getExt = (fileName) => {
     const idx = fileName.lastIndexOf('.');
@@ -1011,7 +1175,7 @@ const createResponsesDispatch = async (req) => {
 };
 const normalizeOpenAIVideoBody = (body) => {
     const modelInput = getFirstBodyValue(body.model) || 'seedance2.0fast';
-    const model = OPENAI_VIDEO_MODEL_ALIASES[modelInput] || modelInput;
+    const model = modelInput.startsWith('jimeng-') ? modelInput : (OPENAI_VIDEO_MODEL_ALIASES[modelInput] || modelInput);
     const size = getFirstBodyValue(body.size);
     const seconds = getFirstBodyValue(body.seconds);
     const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
@@ -1096,7 +1260,10 @@ const dispatchImageTask = async (req, body, files) => {
     try {
         const hasImages = files.length > 0;
         const prompt = getFirstBodyValue(body.prompt);
-        const model = getFirstBodyValue(body.model) || '5.0';
+        const modelAlias = resolveImageModelAlias(body.model);
+        const rawModel = getFirstBodyValue(body.model);
+        const model = modelAlias?.cli_model || rawModel || '5.0';
+        const publicModel = modelAlias?.id || model;
         const resolutionType = getFirstBodyValue(body.resolution_type);
         const ratio = getFirstBodyValue(body.ratio) || '1:1';
         const sessionParam = buildSessionParam(body.session);
@@ -1112,7 +1279,7 @@ const dispatchImageTask = async (req, body, files) => {
             if (files.length > 10)
                 throw httpError(400, 'images must not exceed 10 files');
             if (!IMAGE2IMAGE_MODELS.has(model))
-                throw httpError(400, `model ${model} is not supported for image2image`);
+                throw httpError(400, `model ${publicModel} is not supported for image2image`);
             if (resolutionType && !IMAGE2IMAGE_RESOLUTIONS.has(resolutionType)) {
                 throw httpError(400, 'resolution_type for image2image must be 2k or 4k');
             }
@@ -1124,9 +1291,9 @@ const dispatchImageTask = async (req, body, files) => {
         else {
             const allowed = TEXT2IMAGE_RESOLUTIONS_BY_MODEL.get(model);
             if (!allowed)
-                throw httpError(400, `model ${model} is not supported for text2image`);
+                throw httpError(400, `model ${publicModel} is not supported for text2image`);
             if (resolutionType && !allowed.has(resolutionType)) {
-                throw httpError(400, `resolution_type for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
+                throw httpError(400, `resolution_type for model ${publicModel} must be one of ${Array.from(allowed).join(', ')}`);
             }
             const resParam = resolutionType ? ` --resolution_type=${resolutionType}` : '';
             command = `dreamina text2image --prompt=${shellQuote(prompt || '')} --ratio=${ratio} --model_version=${model}${resParam} ${sessionParam} --poll=0`;
@@ -1135,7 +1302,7 @@ const dispatchImageTask = async (req, body, files) => {
         return await dispatchQueuedTask(req, {
             command,
             type: dbTaskType,
-            model,
+            model: publicModel,
             prompt: prompt || '',
         });
     }
@@ -1147,7 +1314,14 @@ const dispatchUpscaleTask = async (req, body, file) => {
     try {
         if (!file)
             throw httpError(400, 'image file is required');
-        const resolutionType = getFirstBodyValue(body.resolution_type) || '2k';
+        const modelAlias = resolveUpscaleModelAlias(body.model);
+        const aliasId = modelAlias?.id;
+        const aliasResolution = modelAlias ? UPSCALE_ALIAS_TO_RESOLUTION[modelAlias.id] : undefined;
+        const requestedResolution = getFirstBodyValue(body.resolution_type);
+        if (aliasResolution && requestedResolution && requestedResolution !== aliasResolution) {
+            throw httpError(400, `model ${aliasId} only supports resolution_type=${aliasResolution}`);
+        }
+        const resolutionType = requestedResolution || aliasResolution || '2k';
         if (!UPSCALE_RESOLUTIONS.has(resolutionType)) {
             throw httpError(400, 'resolution_type must be one of 2k, 4k, 8k');
         }
@@ -1157,7 +1331,7 @@ const dispatchUpscaleTask = async (req, body, file) => {
         return await dispatchQueuedTask(req, {
             command,
             type: 'image_upscale',
-            model: 'image_upscale',
+            model: aliasId || 'image_upscale',
             prompt: `upscale:${resolutionType}`,
         });
     }
@@ -1174,9 +1348,11 @@ const dispatchVideoTask = async (req, body, filesMap) => {
     try {
         const prompt = getFirstBodyValue(body.prompt);
         const rawModel = getFirstBodyValue(body.model);
-        const modelProvided = rawModel !== undefined;
-        const model = normalizeVideoModelVersion(rawModel || 'seedance2.0fast');
-        const requestedMode = normalizeVideoMode(body.mode ?? body.task_type ?? body.command ?? body.video_mode);
+        const modelAlias = resolveVideoModelAlias(rawModel);
+        const modelProvided = rawModel !== undefined && !modelAlias;
+        const model = normalizeVideoModelVersion(modelAlias?.cli_model || rawModel || 'seedance2.0fast');
+        const modeInput = body.mode ?? body.task_type ?? body.command ?? body.video_mode ?? aliasDefaultMode(modelAlias);
+        const requestedMode = normalizeVideoMode(modeInput);
         const durationRaw = getFirstBodyValue(body.duration);
         const ratioInput = getFirstBodyValue(body.ratio);
         const videoResolution = getFirstBodyValue(body.video_resolution);
@@ -1205,9 +1381,10 @@ const dispatchVideoTask = async (req, body, filesMap) => {
                 : imageCount === 1
                     ? 'image2video'
                     : imageCount === 2
-                        ? (FRAMES2VIDEO_MODELS.has(model) ? 'frames2video' : 'multiframe2video')
+                        ? 'multimodal2video'
                         : 'multiframe2video';
         const mode = requestedMode === 'auto' ? autoMode : requestedMode;
+        const publicModel = modelAlias?.id || (mode === 'multiframe2video' ? 'jimeng-video-keyframes' : model);
         if (hasAudio && !hasImages && !hasVideos) {
             throw httpError(400, 'Audio-only reference is not supported. Please upload at least one image or one video when using audio reference.');
         }
@@ -1217,25 +1394,27 @@ const dispatchVideoTask = async (req, body, filesMap) => {
             if (!prompt)
                 throw httpError(400, 'prompt is required for text2video.');
             if (!TEXT2VIDEO_MODELS.has(model))
-                throw httpError(400, `model ${model} is not supported for text2video.`);
+                throw httpError(400, `model ${publicModel} is not supported for text2video.`);
         }
         if (mode === 'image2video') {
             if (imageCount !== 1 || hasVideos || hasAudio)
                 throw httpError(400, 'image2video requires exactly 1 image and does not accept video or audio references.');
             if (!IMAGE2VIDEO_MODELS.has(model))
-                throw httpError(400, `model ${model} is not supported for image2video.`);
+                throw httpError(400, `model ${publicModel} is not supported for image2video.`);
         }
         if (mode === 'frames2video') {
             if (imageCount !== 2 || hasVideos || hasAudio)
                 throw httpError(400, 'frames2video requires exactly 2 images and does not accept video or audio references.');
             if (!FRAMES2VIDEO_MODELS.has(model))
-                throw httpError(400, `model ${model} is not supported for frames2video.`);
+                throw httpError(400, `model ${publicModel} is not supported for frames2video.`);
         }
         if (mode === 'multiframe2video') {
             if (imageCount < 2 || hasVideos || hasAudio)
                 throw httpError(400, 'multiframe2video requires 2 to 20 images and does not accept video or audio references.');
             if (modelProvided)
                 throw httpError(400, 'multiframe2video does not support model_version. Remove model or choose another video mode.');
+            if (modelAlias && modelAlias.kind !== 'video_keyframes')
+                throw httpError(400, 'multiframe2video must use jimeng-video-keyframes or omit model.');
             if (videoResolution)
                 throw httpError(400, 'multiframe2video does not support video_resolution.');
             if (ratioInput)
@@ -1255,7 +1434,7 @@ const dispatchVideoTask = async (req, body, filesMap) => {
             if (!hasImages && !hasVideos)
                 throw httpError(400, 'multimodal2video requires at least one image or one video reference.');
             if (!MULTIMODAL_MODELS.has(model))
-                throw httpError(400, `model ${model} is not supported for multimodal2video.`);
+                throw httpError(400, `model ${publicModel} is not supported for multimodal2video.`);
             if (imageCount > 9)
                 throw httpError(400, 'multimodal2video supports up to 9 images.');
             if (videoCount > 3)
@@ -1279,12 +1458,12 @@ const dispatchVideoTask = async (req, body, filesMap) => {
                 throw httpError(400, 'duration must be an integer');
             const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
             if (duration < minDuration || duration > maxDuration) {
-                throw httpError(400, `duration for ${mode} with model ${model} must be between ${minDuration} and ${maxDuration} seconds`);
+                throw httpError(400, `duration for ${mode} with model ${publicModel} must be between ${minDuration} and ${maxDuration} seconds`);
             }
             if (videoResolution) {
                 const allowed = getVideoResolutionValues(mode, model);
                 if (!allowed.has(videoResolution)) {
-                    throw httpError(400, `video_resolution for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
+                    throw httpError(400, `video_resolution for model ${publicModel} must be one of ${Array.from(allowed).join(', ')}`);
                 }
             }
         }
@@ -1296,12 +1475,12 @@ const dispatchVideoTask = async (req, body, filesMap) => {
                 throw httpError(400, 'duration must be an integer');
             const [minDuration, maxDuration] = getVideoDurationRange(mode, model);
             if (duration < minDuration || duration > maxDuration) {
-                throw httpError(400, `duration for ${mode} with model ${model} must be between ${minDuration} and ${maxDuration} seconds`);
+                throw httpError(400, `duration for ${mode} with model ${publicModel} must be between ${minDuration} and ${maxDuration} seconds`);
             }
             if (videoResolution) {
                 const allowed = getVideoResolutionValues(mode, model);
                 if (!allowed.has(videoResolution)) {
-                    throw httpError(400, `video_resolution for model ${model} must be one of ${Array.from(allowed).join(', ')}`);
+                    throw httpError(400, `video_resolution for model ${publicModel} must be one of ${Array.from(allowed).join(', ')}`);
                 }
             }
         }
@@ -1337,7 +1516,7 @@ const dispatchVideoTask = async (req, body, filesMap) => {
             }
         }
         let command = '';
-        let dbModel = model;
+        let dbModel = publicModel;
         if (mode === 'multimodal2video') {
             const mediaArgs = orderedMedia.map(item => {
                 const mediaPath = getCliFilePath(item.file);
@@ -1378,7 +1557,7 @@ const dispatchVideoTask = async (req, body, filesMap) => {
                 const transitionDurationArgs = durations.map(value => `--transition-duration=${value}`).join(' ');
                 command = `dreamina multiframe2video ${imagePaths} ${transitionPromptArgs} ${transitionDurationArgs} ${sessionParam} --poll=0`;
             }
-            dbModel = null;
+            dbModel = publicModel;
         }
         else if (mode === 'image2video') {
             const imagePath = getCliFilePath(imageMedia[0].file);
@@ -1452,14 +1631,11 @@ router.get('/models', apiKeyAuth, (_req, res) => {
             multiframe2video: true,
         },
         global_parameters: GLOBAL_MODE_PARAMETERS,
-        data: Array.from(MODEL_CAPABILITIES.entries()).map(([id, capabilities]) => ({
-            id,
-            object: 'model',
-            created: 0,
-            owned_by: 'dreamina',
-            capabilities: Array.from(capabilities),
-            parameters: getModelParameters(id),
-        })),
+        naming: {
+            recommended_prefix: 'jimeng-',
+            rule: 'Use jimeng-* models for Dreamina routing. Legacy raw Dreamina model ids are still accepted for compatibility.',
+        },
+        data: publicModelList(),
     });
 });
 router.post('/responses', apiKeyAuth, responsesUpload.any(), async (req, res) => {
