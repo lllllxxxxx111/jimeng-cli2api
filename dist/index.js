@@ -1,16 +1,8 @@
 "use strict";
 /**
  * @file index.ts
- * @description Jimeng CLI API Wrapper - 核心入口点 (HTTP Dispatcher)。
- *              同时负责托管前端 SPA 产物，和管理不同的业务路由层。
- * @author XiaoYue <43854695@qq.com>
+ * @description Jimeng CLI API wrapper HTTP entrypoint.
  * @license MIT
- * @date 2026-04-17
- *
- * [! 防屎山规范 !]
- * - 坚持中间件单一职责。
- * - 错误处理在底部统一拦截，避免抛出给前端导致页面崩溃。
- * - 前后端分离原则，所有 API 开头必须为 /v1 或 /admin。
  */
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
@@ -25,35 +17,55 @@ const fs_1 = __importDefault(require("fs"));
 const openai_1 = __importDefault(require("./routes/openai"));
 const openai_media_1 = __importDefault(require("./routes/openai_media"));
 const admin_1 = __importDefault(require("./routes/admin"));
+const databaseIndexes_1 = require("./services/databaseIndexes");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 3000;
+const allowedOrigins = new Set((process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean));
 app.use((0, cors_1.default)({
     origin: (origin, callback) => {
-        // file:// 页面的 origin 是 undefined 或字符串 "null"，统一返回 * 放行
-        if (!origin || origin === 'null') {
-            callback(null, '*');
-        }
-        else {
-            callback(null, origin);
-        }
+        if (!origin || origin === 'null' || allowedOrigins.has(origin))
+            return callback(null, true);
+        return callback(null, false);
     },
 }));
 app.use(express_1.default.json({ limit: '64mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '64mb' }));
-// 托管根目录静态文件（test_client.html 等）
-app.use(express_1.default.static(path_1.default.resolve(__dirname, '..')));
-// 托管前端构建产物（frontend/dist）
+const blockedPublicPaths = [
+    '/data',
+    '/src',
+    '/prisma',
+    '/dist',
+    '/node_modules',
+    '/frontend',
+    '/temp_uploads',
+    '/logs',
+    '/.env',
+    '/package.json',
+    '/package-lock.json',
+    '/tsconfig.json',
+];
+app.use((req, res, next) => {
+    const requestPath = req.path.replace(/\\/g, '/');
+    if (blockedPublicPaths.some((blocked) => requestPath === blocked || requestPath.startsWith(blocked + '/'))) {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    return next();
+});
+// Serve the built admin frontend.
 const frontendDist = path_1.default.resolve(__dirname, '../frontend/dist');
 if (fs_1.default.existsSync(frontendDist)) {
     app.use(express_1.default.static(frontendDist));
 }
-// 对外提供标准 OpenAI 协议生图和即梦的生视频
+// Public OpenAI-compatible media endpoints.
 app.use('/v1', openai_1.default);
 app.use('/v1', openai_media_1.default);
-// 对内提供管理 API
+// Admin API.
 app.use('/admin', admin_1.default);
-// API 错误统一返回 JSON，避免前端解析到 HTML 错页
+// Return JSON errors for APIs instead of HTML pages.
 app.use((err, req, res, next) => {
     if (!err) {
         return next();
@@ -65,20 +77,23 @@ app.use((err, req, res, next) => {
     }
     return res.status(status).send(message);
 });
-// 简单心跳路由
+// Health check.
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', version: '1.0.0' });
 });
-// 前端 SPA fallback：所有未匹配路由返回 index.html
+// SPA fallback.
 if (fs_1.default.existsSync(frontendDist)) {
     app.get('/*splat', (req, res) => {
         res.sendFile(path_1.default.join(frontendDist, 'index.html'));
     });
 }
+(0, databaseIndexes_1.ensureDatabaseIndexes)().catch((error) => {
+    console.error('[Database] Failed to ensure indexes:', error);
+});
 pollingDaemon_1.pollingDaemon.start();
 app.listen(PORT, () => {
-    console.log(`[🚀] Jimeng OpenAI Dispatcher Server running on http://localhost:${PORT}`);
+    console.log(`[Server] Jimeng OpenAI Dispatcher Server running on http://localhost:${PORT}`);
     console.log(`[Admin] Dashboard: http://localhost:${PORT}`);
-    console.log(`[🤖] OpenAI Base URL: http://localhost:${PORT}/v1`);
+    console.log(`[OpenAI] Base URL: http://localhost:${PORT}/v1`);
 });
 //# sourceMappingURL=index.js.map

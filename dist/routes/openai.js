@@ -22,13 +22,12 @@ const cliRunner_1 = require("../utils/cliRunner");
 const multer_1 = __importDefault(require("multer"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const axios_1 = __importDefault(require("axios"));
 const child_process_1 = require("child_process");
 const util_1 = require("util");
 const crypto_1 = require("crypto");
+const remoteInput_1 = require("../utils/remoteInput");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
-const upload = (0, multer_1.default)({ dest: 'temp_uploads/' });
 const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 const MB = 1024 * 1024;
 const IMAGE_MAX_BYTES = 30 * MB;
@@ -39,6 +38,10 @@ const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '
 const VIDEO_EXTS = new Set(['.mp4', '.mov']);
 const AUDIO_EXTS = new Set(['.wav', '.mp3']);
 const TEMP_UPLOAD_ROOT = path_1.default.resolve(process.cwd(), 'temp_uploads');
+const upload = (0, multer_1.default)({
+    dest: 'temp_uploads/',
+    limits: { fileSize: VIDEO_MAX_BYTES, files: 30 },
+});
 const responsesUpload = (0, multer_1.default)({
     dest: 'temp_uploads/',
     limits: { fileSize: VIDEO_MAX_BYTES, files: 30 },
@@ -725,6 +728,36 @@ const validateSeedance2Inputs = async (orderedMedia) => {
     }
     return details;
 };
+const validateBasicMediaInputs = (orderedMedia) => {
+    const details = [];
+    const totalBytes = orderedMedia.reduce((sum, item) => sum + item.file.size, 0);
+    if (totalBytes > REQUEST_MAX_BYTES) {
+        details.push({ field: 'request', message: `request files total ${(totalBytes / MB).toFixed(2)}MB exceeds the 64MB limit` });
+    }
+    for (const item of orderedMedia) {
+        const f = item.file;
+        const ext = getExt(f.originalname || f.filename);
+        if (item.type === 'image') {
+            if (!IMAGE_EXTS.has(ext))
+                details.push({ field: 'image', file: f.originalname, message: 'unsupported image format; use jpeg/png/webp/bmp/tiff/gif' });
+            if (f.size > IMAGE_MAX_BYTES)
+                details.push({ field: 'image', file: f.originalname, message: `image size ${(f.size / MB).toFixed(2)}MB exceeds the 30MB limit` });
+        }
+        else if (item.type === 'video') {
+            if (!VIDEO_EXTS.has(ext))
+                details.push({ field: 'video', file: f.originalname, message: 'unsupported video format; use mp4/mov' });
+            if (f.size > VIDEO_MAX_BYTES)
+                details.push({ field: 'video', file: f.originalname, message: `video size ${(f.size / MB).toFixed(2)}MB exceeds the 50MB limit` });
+        }
+        else {
+            if (!AUDIO_EXTS.has(ext))
+                details.push({ field: 'audio', file: f.originalname, message: 'unsupported audio format; use wav/mp3' });
+            if (f.size > AUDIO_MAX_BYTES)
+                details.push({ field: 'audio', file: f.originalname, message: `audio size ${(f.size / MB).toFixed(2)}MB exceeds the 15MB limit` });
+        }
+    }
+    return details;
+};
 const normalizeReferenceOrder = (raw) => {
     if (!raw)
         return [];
@@ -866,34 +899,30 @@ const saveResponseInputFile = async (input, type) => {
     if (dataUrl) {
         const mime = dataUrl[1] || '';
         const buffer = Buffer.from(dataUrl[2] || '', 'base64');
+        const maxBytes = type === 'video' ? VIDEO_MAX_BYTES : type === 'audio' ? AUDIO_MAX_BYTES : IMAGE_MAX_BYTES;
+        if (buffer.length > maxBytes)
+            throw httpError(400, `${type} input exceeds ${(maxBytes / MB).toFixed(0)}MB`);
         const ext = getMimeExt(mime) || (type === 'video' ? '.mp4' : type === 'audio' ? '.mp3' : '.png');
         const file = makeTempFileFromBuffer(buffer, ext, `input${ext}`);
         file.mimetype = mime || inferMimeType(ext, type);
         return file;
     }
     if (text.startsWith('http://') || text.startsWith('https://')) {
-        const response = await (0, axios_1.default)({ url: text, responseType: 'arraybuffer', timeout: 30000 });
-        const mime = String(response.headers?.['content-type'] || '');
-        const buffer = Buffer.from(response.data);
-        const ext = getMimeExt(mime) || path_1.default.extname(new URL(text).pathname) || '.bin';
-        const file = makeTempFileFromBuffer(buffer, ext, path_1.default.basename(new URL(text).pathname) || `remote-input${ext}`);
+        const maxBytes = type === 'video' ? VIDEO_MAX_BYTES : type === 'audio' ? AUDIO_MAX_BYTES : IMAGE_MAX_BYTES;
+        let response;
+        try {
+            response = await (0, remoteInput_1.downloadRemoteInput)(text, { maxBytes, timeoutMs: 30000 });
+        }
+        catch (error) {
+            throw httpError(400, error.message || 'remote URL is not allowed');
+        }
+        const mime = response.contentType;
+        const ext = getMimeExt(mime) || path_1.default.extname(response.url.pathname) || '.bin';
+        const file = makeTempFileFromBuffer(response.buffer, ext, path_1.default.basename(response.url.pathname) || `remote-input${ext}`);
         file.mimetype = mime || inferMimeType(ext, type);
         return file;
     }
-    const resolved = path_1.default.resolve(text);
-    if (!fs_1.default.existsSync(resolved))
-        throw httpError(400, `input file does not exist: ${text}`);
-    const rel = path_1.default.relative(process.cwd(), resolved).replace(/\\/g, '/');
-    return {
-        fieldname: 'response_input',
-        originalname: path_1.default.basename(resolved),
-        encoding: '7bit',
-        mimetype: inferMimeType(path_1.default.extname(resolved), type),
-        destination: path_1.default.dirname(resolved),
-        filename: path_1.default.basename(resolved),
-        path: path_1.default.isAbsolute(rel) || rel.startsWith('..') ? resolved : rel,
-        size: fs_1.default.statSync(resolved).size,
-    };
+    throw httpError(400, 'local file paths are not accepted by the public API; upload the file or provide a safe http(s) URL');
 };
 const httpError = (statusCode, message) => {
     const error = new Error(message);
@@ -1312,6 +1341,10 @@ const dispatchQueuedTask = async (req, options) => {
 const dispatchImageTask = async (req, body, files) => {
     try {
         const hasImages = files.length > 0;
+        const validationDetails = validateBasicMediaInputs(files.map((file, index) => ({ type: 'image', file, index })));
+        if (validationDetails.length > 0) {
+            throw httpError(400, `image validation failed: ${validationDetails.map(item => item.message).join('; ')}`);
+        }
         const prompt = getFirstBodyValue(body.prompt);
         const modelAlias = resolveImageModelAlias(body.model);
         const rawModel = getFirstBodyValue(body.model);
@@ -1367,6 +1400,10 @@ const dispatchUpscaleTask = async (req, body, file) => {
     try {
         if (!file)
             throw httpError(400, 'image file is required');
+        const validationDetails = validateBasicMediaInputs([{ type: 'image', file, index: 0 }]);
+        if (validationDetails.length > 0) {
+            throw httpError(400, `image validation failed: ${validationDetails.map(item => item.message).join('; ')}`);
+        }
         const modelAlias = resolveUpscaleModelAlias(body.model);
         const aliasId = modelAlias?.id;
         const aliasResolution = modelAlias ? UPSCALE_ALIAS_TO_RESOLUTION[modelAlias.id] : undefined;
@@ -1417,6 +1454,10 @@ const dispatchVideoTask = async (req, body, filesMap) => {
         }
         const referenceOrder = normalizeReferenceOrder(body.reference_order);
         const orderedMedia = buildOrderedMedia(filesMap, referenceOrder);
+        const basicValidationDetails = validateBasicMediaInputs(orderedMedia);
+        if (basicValidationDetails.length > 0) {
+            throw httpError(400, `media validation failed: ${basicValidationDetails.map(item => item.message).join('; ')}`);
+        }
         const imageMedia = orderedMedia.filter(item => item.type === 'image');
         const videoMedia = orderedMedia.filter(item => item.type === 'video');
         const audioMedia = orderedMedia.filter(item => item.type === 'audio');

@@ -1,15 +1,7 @@
 /**
  * @file index.ts
- * @description Jimeng CLI API Wrapper - 核心入口点 (HTTP Dispatcher)。
- *              同时负责托管前端 SPA 产物，和管理不同的业务路由层。
- * @author XiaoYue <43854695@qq.com>
+ * @description Jimeng CLI API wrapper HTTP entrypoint.
  * @license MIT
- * @date 2026-04-17
- * 
- * [! 防屎山规范 !]
- * - 坚持中间件单一职责。
- * - 错误处理在底部统一拦截，避免抛出给前端导致页面崩溃。
- * - 前后端分离原则，所有 API 开头必须为 /v1 或 /admin。
  */
 
 import { pollingDaemon } from './services/pollingDaemon';
@@ -21,42 +13,65 @@ import fs from 'fs';
 import openaiRoutes from './routes/openai';
 import openaiMediaRoutes from './routes/openai_media';
 import adminRoutes from './routes/admin';
+import { ensureDatabaseIndexes } from './services/databaseIndexes';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const allowedOrigins = new Set(
+  (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
 
 app.use(cors({
   origin: (origin, callback) => {
-    // file:// 页面的 origin 是 undefined 或字符串 "null"，统一返回 * 放行
-    if (!origin || origin === 'null') {
-      callback(null, '*');
-    } else {
-      callback(null, origin);
-    }
+    if (!origin || origin === 'null' || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(null, false);
   },
 }));
 app.use(express.json({ limit: '64mb' }));
 app.use(express.urlencoded({ extended: true, limit: '64mb' }));
 
-// 托管根目录静态文件（test_client.html 等）
-app.use(express.static(path.resolve(__dirname, '..')));
+const blockedPublicPaths = [
+  '/data',
+  '/src',
+  '/prisma',
+  '/dist',
+  '/node_modules',
+  '/frontend',
+  '/temp_uploads',
+  '/logs',
+  '/.env',
+  '/package.json',
+  '/package-lock.json',
+  '/tsconfig.json',
+];
 
-// 托管前端构建产物（frontend/dist）
+app.use((req, res, next) => {
+  const requestPath = req.path.replace(/\\/g, '/');
+  if (blockedPublicPaths.some((blocked) => requestPath === blocked || requestPath.startsWith(blocked + '/'))) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
+});
+
+// Serve the built admin frontend.
 const frontendDist = path.resolve(__dirname, '../frontend/dist');
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
 }
 
-// 对外提供标准 OpenAI 协议生图和即梦的生视频
+// Public OpenAI-compatible media endpoints.
 app.use('/v1', openaiRoutes);
 app.use('/v1', openaiMediaRoutes);
 
-// 对内提供管理 API
+// Admin API.
 app.use('/admin', adminRoutes);
 
-// API 错误统一返回 JSON，避免前端解析到 HTML 错页
+// Return JSON errors for APIs instead of HTML pages.
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (!err) {
     return next();
@@ -72,22 +87,25 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   return res.status(status).send(message);
 });
 
-// 简单心跳路由
+// Health check.
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '1.0.0' });
 });
 
-// 前端 SPA fallback：所有未匹配路由返回 index.html
+// SPA fallback.
 if (fs.existsSync(frontendDist)) {
   app.get('/*splat', (req, res) => {
     res.sendFile(path.join(frontendDist, 'index.html'));
   });
 }
 
+ensureDatabaseIndexes().catch((error) => {
+  console.error('[Database] Failed to ensure indexes:', error);
+});
 pollingDaemon.start();
 
 app.listen(PORT, () => {
-  console.log(`[🚀] Jimeng OpenAI Dispatcher Server running on http://localhost:${PORT}`);
+  console.log(`[Server] Jimeng OpenAI Dispatcher Server running on http://localhost:${PORT}`);
   console.log(`[Admin] Dashboard: http://localhost:${PORT}`);
-  console.log(`[🤖] OpenAI Base URL: http://localhost:${PORT}/v1`);
+  console.log(`[OpenAI] Base URL: http://localhost:${PORT}/v1`);
 });

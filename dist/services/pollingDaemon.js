@@ -43,6 +43,18 @@ function getAdaptiveConcurrency(taskCount) {
     const estimated = Math.floor(TARGET_BATCH_MS / p75);
     return Math.max(MIN_CONCURRENCY, Math.min(MAX_CONCURRENCY, estimated, taskCount));
 }
+async function runWithConcurrency(items, limit, worker) {
+    let cursor = 0;
+    const workerCount = Math.max(1, Math.min(limit, items.length));
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (true) {
+            const index = cursor++;
+            if (index >= items.length)
+                return;
+            await worker(items[index]);
+        }
+    }));
+}
 // ─────────────────────────────────────────────────────────────────
 function extractJsonPayload(stdout) {
     const arrayMatch = stdout.match(/\[[\s\S]*\]/);
@@ -188,7 +200,7 @@ exports.pollingDaemon = {
                     const homeDir = accountTasks[0].account?.homeDir || process.cwd();
                     await (0, cliRunner_1.withCredSwap)(homeDir, async () => {
                         // 同账号任务：锁内并发执行（不再各自 re-acquire mutex）
-                        await Promise.all(accountTasks.map(async (task) => {
+                        await runWithConcurrency(accountTasks, batchSize, async (task) => {
                             if (!task.jimengSubmitId)
                                 return;
                             const t0 = Date.now();
@@ -276,7 +288,7 @@ exports.pollingDaemon = {
                                     data: { pollErrorMsg: `[${new Date().toISOString()}] 未知状态"${state.rawStatus}"，保持等待。` }
                                 });
                             }
-                        })); // end Promise.all(accountTasks)
+                        }); // end runWithConcurrency(accountTasks)
                     }); // end withCredSwap callback
                 } // end for...of byAccount
             }

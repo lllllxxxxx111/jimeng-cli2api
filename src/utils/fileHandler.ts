@@ -1,9 +1,16 @@
 import fs from 'fs';
 import path from 'path';
-import axios from 'axios';
 import { randomUUID } from 'crypto';
+import { downloadRemoteInput } from './remoteInput';
 
 const tempDir = path.resolve(__dirname, '../../data/temp_inputs');
+const IMAGE_MAX_BYTES = 30 * 1024 * 1024;
+
+const fileInputError = (message: string) => {
+  const error = new Error(message);
+  (error as any).statusCode = 400;
+  return error;
+};
 
 // Ensure temp dir exists
 if (!fs.existsSync(tempDir)) {
@@ -24,25 +31,27 @@ export const saveTempFile = async (input: string | Buffer, ext = '.png'): Promis
 
   if (typeof input === 'string') {
     if (input.startsWith('http://') || input.startsWith('https://')) {
-      // Download image
-      const response = await axios({
-        url: input,
-        responseType: 'arraybuffer',
-      });
-      fs.writeFileSync(filePath, response.data);
+      let response;
+      try {
+        response = await downloadRemoteInput(input, { maxBytes: IMAGE_MAX_BYTES });
+      } catch (error: any) {
+        throw fileInputError(error.message || 'remote image URL is not allowed');
+      }
+      fs.writeFileSync(filePath, response.buffer);
       return filePath;
     } else if (input.startsWith('data:image')) {
       // Base64
       const matches = input.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
       if (matches && matches.length === 3) {
         const buffer = Buffer.from(matches[2], 'base64');
+        if (buffer.length > IMAGE_MAX_BYTES) throw fileInputError('image input exceeds the 30MB limit');
         fs.writeFileSync(filePath, buffer);
         return filePath;
       }
     }
   }
   
-  throw new Error('Unsupported file input format');
+  throw fileInputError('Unsupported file input format');
 };
 
 export const cleanupTempFile = (filePath: string) => {

@@ -2,16 +2,23 @@ import { Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import bcrypt from 'bcryptjs';
+import { randomBytes, timingSafeEqual } from 'crypto';
 
 const configDir = path.resolve(__dirname, '../../data');
 if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 
 const configPath = path.resolve(configDir, 'admin.json');
 
-// Initialize admin config if not exists — store bcrypt hash of default password "admin"
 if (!fs.existsSync(configPath)) {
-  const hash = bcrypt.hashSync('admin', 10);
-  fs.writeFileSync(configPath, JSON.stringify({ password: hash, token: 'admin_token_' + Date.now() }));
+  const initialPassword = process.env.ADMIN_PASSWORD || randomBytes(18).toString('base64url');
+  const hash = bcrypt.hashSync(initialPassword, 10);
+  const token = 'admin_token_' + randomBytes(32).toString('hex');
+  fs.writeFileSync(configPath, JSON.stringify({ password: hash, token }));
+  if (!process.env.ADMIN_PASSWORD) {
+    const bootstrapPath = path.resolve(configDir, 'admin_bootstrap_password.txt');
+    fs.writeFileSync(bootstrapPath, initialPassword, { encoding: 'utf8', mode: 0o600 });
+    console.warn(`[Admin] Generated bootstrap password at ${bootstrapPath}. Change it after first login.`);
+  }
 } else {
   // Migrate plaintext password to bcrypt hash on first run after upgrade
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -21,6 +28,12 @@ if (!fs.existsSync(configPath)) {
   }
 }
 
+const safeTokenEqual = (left: string, right: string) => {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+
 export const adminAuth = (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -29,7 +42,7 @@ export const adminAuth = (req: Request, res: Response, next: NextFunction) => {
   const token = authHeader.split(' ')[1];
   
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  if (token !== config.token) {
+  if (!safeTokenEqual(token, String(config.token || ''))) {
     return res.status(403).json({ error: 'Forbidden: Invalid token' });
   }
   

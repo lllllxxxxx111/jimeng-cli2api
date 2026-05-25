@@ -7,14 +7,21 @@ exports.adminAuth = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
+const crypto_1 = require("crypto");
 const configDir = path_1.default.resolve(__dirname, '../../data');
 if (!fs_1.default.existsSync(configDir))
     fs_1.default.mkdirSync(configDir, { recursive: true });
 const configPath = path_1.default.resolve(configDir, 'admin.json');
-// Initialize admin config if not exists — store bcrypt hash of default password "admin"
 if (!fs_1.default.existsSync(configPath)) {
-    const hash = bcryptjs_1.default.hashSync('admin', 10);
-    fs_1.default.writeFileSync(configPath, JSON.stringify({ password: hash, token: 'admin_token_' + Date.now() }));
+    const initialPassword = process.env.ADMIN_PASSWORD || (0, crypto_1.randomBytes)(18).toString('base64url');
+    const hash = bcryptjs_1.default.hashSync(initialPassword, 10);
+    const token = 'admin_token_' + (0, crypto_1.randomBytes)(32).toString('hex');
+    fs_1.default.writeFileSync(configPath, JSON.stringify({ password: hash, token }));
+    if (!process.env.ADMIN_PASSWORD) {
+        const bootstrapPath = path_1.default.resolve(configDir, 'admin_bootstrap_password.txt');
+        fs_1.default.writeFileSync(bootstrapPath, initialPassword, { encoding: 'utf8', mode: 0o600 });
+        console.warn(`[Admin] Generated bootstrap password at ${bootstrapPath}. Change it after first login.`);
+    }
 }
 else {
     // Migrate plaintext password to bcrypt hash on first run after upgrade
@@ -24,6 +31,11 @@ else {
         fs_1.default.writeFileSync(configPath, JSON.stringify(config));
     }
 }
+const safeTokenEqual = (left, right) => {
+    const a = Buffer.from(left);
+    const b = Buffer.from(right);
+    return a.length === b.length && (0, crypto_1.timingSafeEqual)(a, b);
+};
 const adminAuth = (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -31,7 +43,7 @@ const adminAuth = (req, res, next) => {
     }
     const token = authHeader.split(' ')[1];
     const config = JSON.parse(fs_1.default.readFileSync(configPath, 'utf8'));
-    if (token !== config.token) {
+    if (!safeTokenEqual(token, String(config.token || ''))) {
         return res.status(403).json({ error: 'Forbidden: Invalid token' });
     }
     next();

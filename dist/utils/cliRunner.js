@@ -19,6 +19,7 @@ const fs_1 = __importDefault(require("fs"));
 const os_1 = __importDefault(require("os"));
 const crypto_1 = require("crypto");
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
+const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 // ─── Windows Registry Token 隔离 ──────────────────────────────────────────────
 // dreamina CLI 使用 zalando/go-keyring 库，将 OAuth token 以 DPAPI 保护的 base64 字符串
 // 存入固定注册表路径：
@@ -116,8 +117,51 @@ function resolveDreaminaBinPath() {
 }
 // 用于 spawn() 的第一个参数（不需要引号，Node 自行处理路径）
 exports.DREAMINA_BIN = resolveDreaminaBinPath();
-// 用于 exec() 字符串拼接（Windows 路径有空格时需要引号）
-const DREAMINA_BIN_QUOTED = exports.DREAMINA_BIN === 'dreamina' ? 'dreamina' : `"${exports.DREAMINA_BIN}"`;
+function parseCommandLine(command) {
+    const args = [];
+    let current = '';
+    let inQuotes = false;
+    let escaping = false;
+    for (const ch of command.trim()) {
+        if (escaping) {
+            current += ch;
+            escaping = false;
+            continue;
+        }
+        if (ch === '\\' && inQuotes) {
+            escaping = true;
+            continue;
+        }
+        if (ch === '"') {
+            inQuotes = !inQuotes;
+            continue;
+        }
+        if (/\s/.test(ch) && !inQuotes) {
+            if (current) {
+                args.push(current);
+                current = '';
+            }
+            continue;
+        }
+        current += ch;
+    }
+    if (escaping)
+        current += '\\';
+    if (inQuotes)
+        throw new Error('Invalid CLI command: unterminated quote');
+    if (current)
+        args.push(current);
+    return args;
+}
+function resolveDreaminaCommand(command) {
+    const parsed = parseCommandLine(command);
+    if (parsed.length === 0)
+        throw new Error('Invalid CLI command: empty command');
+    if (parsed[0] !== 'dreamina') {
+        throw new Error('Invalid CLI command: only dreamina commands are allowed');
+    }
+    return { file: exports.DREAMINA_BIN, args: parsed.slice(1) };
+}
 /**
  * Windows 上 CLI 的 credential.json 始终写入真实用户 home 目录，无视 USERPROFILE 环境变量。
  * 解决方案：
@@ -259,7 +303,7 @@ function generateFreshCredential(accountHomeDir) {
  * 同时通过 withCredSwap 保证每次执行时使用正确账号的 credential.json
  */
 const runJimengCommand = async (command, accountHomeDir, saveBackup = false, timeoutMs = 1000 * 60 * 5) => {
-    const resolvedCommand = command.replace(/^dreamina\b/, DREAMINA_BIN_QUOTED);
+    const resolvedCommand = resolveDreaminaCommand(command);
     const env = { ...process.env };
     if (accountHomeDir) {
         const absoluteHome = path_1.default.resolve(accountHomeDir);
@@ -270,9 +314,11 @@ const runJimengCommand = async (command, accountHomeDir, saveBackup = false, tim
     }
     const runFn = async () => {
         try {
-            const { stdout, stderr } = await execAsync(resolvedCommand, {
+            const { stdout, stderr } = await execFileAsync(resolvedCommand.file, resolvedCommand.args, {
                 env,
                 timeout: timeoutMs,
+                windowsHide: true,
+                maxBuffer: 16 * 1024 * 1024,
             });
             // saveBackup=true 时在互斥锁内立即备份，防止其他账号在锁释放前抢占覆盖
             if (saveBackup && accountHomeDir) {
@@ -299,7 +345,7 @@ exports.runJimengCommand = runJimengCommand;
  * ⚠️ 调用者必须确保：此函数只在 withCredSwap 的回调内部调用，且不切换账号。
  */
 const runJimengCommandInSwap = async (command, accountHomeDir) => {
-    const resolvedCommand = command.replace(/^dreamina\b/, DREAMINA_BIN_QUOTED);
+    const resolvedCommand = resolveDreaminaCommand(command);
     const env = { ...process.env };
     const absoluteHome = path_1.default.resolve(accountHomeDir);
     env.HOME = absoluteHome;
@@ -307,7 +353,12 @@ const runJimengCommandInSwap = async (command, accountHomeDir) => {
     env.APPDATA = absoluteHome;
     env.LOCALAPPDATA = absoluteHome;
     try {
-        const { stdout, stderr } = await execAsync(resolvedCommand, { env, timeout: 1000 * 60 * 5 });
+        const { stdout, stderr } = await execFileAsync(resolvedCommand.file, resolvedCommand.args, {
+            env,
+            timeout: 1000 * 60 * 5,
+            windowsHide: true,
+            maxBuffer: 16 * 1024 * 1024,
+        });
         return { stdout, stderr };
     }
     catch (error) {

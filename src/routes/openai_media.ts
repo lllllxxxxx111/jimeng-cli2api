@@ -4,16 +4,20 @@ import { accountService } from '../services/accountService';
 import { runJimengCommand } from '../utils/cliRunner';
 import { saveTempFile, cleanupTempFile } from '../utils/fileHandler';
 import multer from 'multer';
-import fs from 'fs';
 
 const router = Router();
 const prisma = new PrismaClient();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+const shellQuote = (value: string): string => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 function buildSessionParam(raw: unknown): string {
   if (raw === undefined || raw === null || raw === '') return '';
   const session = Number(raw);
-  if (!Number.isInteger(session) || session < 0) throw new Error('session must be a non-negative integer');
+  if (!Number.isInteger(session) || session < 0) {
+    const error = new Error('session must be a non-negative integer');
+    (error as any).statusCode = 400;
+    throw error;
+  }
   return `--session=${session}`;
 }
 
@@ -149,12 +153,12 @@ router.post('/jimeng/image2video', apiKeyAuth, upload.single('image'), async (re
 
     const sessionParam = buildSessionParam(req.body.session);
     const cmdBuilder = (localPath: string | null) => 
-        `dreamina image2video --image "${localPath}" --prompt="${prompt}" --duration=5 ${sessionParam} --poll=0`;
+        `dreamina image2video --image=${shellQuote(localPath || '')} --prompt=${shellQuote(prompt)} --duration=5 ${sessionParam} --poll=0`;
 
     return await dispatchJimengTask(req, res, 'image2video', cmdBuilder, tempFilePath);
 
   } catch (err: any) {
-    return res.status(500).json({ error: { message: err.message } });
+    return res.status(err.statusCode || err.status || 500).json({ error: { message: err.message } });
   }
 });
 

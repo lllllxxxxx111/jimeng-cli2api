@@ -22,9 +22,41 @@ const ACCOUNT_CHECK_TIMEOUT_MS = 30000;
 const NATIVE_CLI_TIMEOUT_MS = 60000;
 const NATIVE_CLI_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 5;
 const NATIVE_DOWNLOAD_ROOT = path_1.default.resolve(__dirname, '../../data/downloads');
+const ACCOUNTS_ROOT = path_1.default.resolve(__dirname, '../../data/accounts');
 const SAFE_CLI_TOKEN = /^[A-Za-z0-9_.:-]+$/;
 const SAFE_SUBMIT_ID = /^[A-Za-z0-9_-]+$/;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 8;
+const loginAttempts = new Map();
 const shellQuote = (value) => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+const assertInside = (root, target, message) => {
+    const resolvedRoot = path_1.default.resolve(root);
+    const resolvedTarget = path_1.default.resolve(target);
+    if (resolvedTarget === resolvedRoot || resolvedTarget.startsWith(resolvedRoot + path_1.default.sep)) {
+        return resolvedTarget;
+    }
+    throw new Error(message);
+};
+const safeAccountDirName = (name) => {
+    const safe = name.trim().replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+    return safe || 'account';
+};
+const getClientKey = (req) => req.ip || req.socket.remoteAddress || 'unknown';
+const getLoginAttempt = (key) => {
+    const now = Date.now();
+    const current = loginAttempts.get(key);
+    if (!current || current.resetAt <= now) {
+        const fresh = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+        loginAttempts.set(key, fresh);
+        return fresh;
+    }
+    return current;
+};
+const recordFailedLogin = (key) => {
+    const attempt = getLoginAttempt(key);
+    attempt.count += 1;
+};
+const clearLoginAttempts = (key) => loginAttempts.delete(key);
 const getScalar = (value) => {
     const raw = Array.isArray(value) ? value[0] : value;
     return raw === undefined || raw === null ? '' : String(raw).trim();
@@ -99,9 +131,7 @@ const getSafeDownloadDir = (submitId, rawName) => {
     const fallbackName = submitId.replace(/[^A-Za-z0-9_.-]/g, '_');
     const cleanName = (rawName || fallbackName).replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 100) || fallbackName;
     const target = path_1.default.resolve(NATIVE_DOWNLOAD_ROOT, cleanName);
-    if (target !== NATIVE_DOWNLOAD_ROOT && !target.startsWith(NATIVE_DOWNLOAD_ROOT + path_1.default.sep)) {
-        throw new Error('download directory is outside the allowed data/downloads folder');
-    }
+    assertInside(NATIVE_DOWNLOAD_ROOT, target, 'download directory is outside the allowed data/downloads folder');
     fs_1.default.mkdirSync(target, { recursive: true });
     return target;
 };
@@ -233,15 +263,24 @@ router.post('/sys/login', async (req, res) => {
     const { password } = req.body;
     if (!password)
         return res.status(400).json({ error: '密码不能为空' });
+    const clientKey = getClientKey(req);
+    const attempt = getLoginAttempt(clientKey);
+    if (attempt.count >= LOGIN_MAX_ATTEMPTS) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((attempt.resetAt - Date.now()) / 1000));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({ error: '登录失败次数过多，请稍后再试' });
+    }
     const configPath = path_1.default.resolve(__dirname, '../../data/admin.json');
     const config = JSON.parse(fs_1.default.readFileSync(configPath, 'utf8'));
     const match = await bcryptjs_1.default.compare(password, config.password);
     if (match) {
-        const token = 'admin_token_' + Date.now();
+        clearLoginAttempts(clientKey);
+        const token = 'admin_token_' + (0, crypto_1.randomBytes)(32).toString('hex');
         config.token = token;
         fs_1.default.writeFileSync(configPath, JSON.stringify(config));
         return res.json({ token });
     }
+    recordFailedLogin(clientKey);
     res.status(401).json({ error: '密码错误' });
 });
 router.post('/sys/password', adminAuth_1.adminAuth, async (req, res) => {
@@ -253,7 +292,7 @@ router.post('/sys/password', adminAuth_1.adminAuth, async (req, res) => {
     const match = await bcryptjs_1.default.compare(oldPassword, config.password);
     if (match) {
         config.password = await bcryptjs_1.default.hash(newPassword, 10);
-        config.token = 'admin_token_' + Date.now(); // force relogin
+        config.token = 'admin_token_' + (0, crypto_1.randomBytes)(32).toString('hex'); // force relogin
         fs_1.default.writeFileSync(configPath, JSON.stringify(config));
         return res.json({ success: true, message: '密码修改成功，请重新登录' });
     }
@@ -350,12 +389,15 @@ function parseOAuthOutput(output) {
 // 添加新即梦账号并触发 OAuth Device Flow 登录
 router.post('/accounts/login', async (req, res) => {
     const { name } = req.body;
-    if (!name)
+    const displayName = String(name || '').trim();
+    if (!displayName)
         return res.status(400).json({ error: '账号名称不能为空' });
+    if (displayName.length > 50)
+        return res.status(400).json({ error: '账号名称不能超过 50 个字符' });
     try {
-        const homeDir = path_1.default.resolve(__dirname, `../../data/accounts/${name}_${Date.now()}`);
+        const homeDir = assertInside(ACCOUNTS_ROOT, path_1.default.resolve(ACCOUNTS_ROOT, `${safeAccountDirName(displayName)}_${Date.now()}`), 'account homeDir is outside the allowed data/accounts folder');
         const account = await prisma.jimengAccount.create({
-            data: { name, homeDir, status: 'IDLE', creditBalance: 0 }
+            data: { name: displayName, homeDir, status: 'IDLE', creditBalance: 0 }
         });
         const { spawn } = require('child_process');
         const absoluteHome = path_1.default.resolve(account.homeDir);
@@ -543,11 +585,11 @@ router.delete('/accounts/:id', async (req, res) => {
         const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
         if (!account)
             return res.status(404).json({ error: '账号不存在' });
+        const absoluteHome = assertInside(ACCOUNTS_ROOT, path_1.default.resolve(account.homeDir), 'account homeDir is outside the allowed data/accounts folder');
         // 先删 DB 记录
         await prisma.jimengAccount.delete({ where: { id: account.id } });
         // 再清理 homeDir（忽略错误，目录可能不存在）
         try {
-            const absoluteHome = path_1.default.resolve(account.homeDir);
             if (fs_1.default.existsSync(absoluteHome)) {
                 fs_1.default.rmSync(absoluteHome, { recursive: true, force: true });
             }
