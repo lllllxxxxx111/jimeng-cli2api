@@ -151,6 +151,84 @@ const nativeCapabilities = {
   },
 };
 
+const startOfLocalDay = () => {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+
+const rowsToCountMap = (rows: Array<any>, key: string) => new Map(
+  rows.map((row) => [String(row[key]), row._count._all])
+);
+
+async function getAccountTaskMetrics(accountIds: string[]) {
+  if (!accountIds.length) return new Map<string, any>();
+  const todayStart = startOfLocalDay();
+  const [
+    totalRows,
+    todayRows,
+    processingRows,
+    todaySuccessRows,
+    failedRows,
+    todayFailedRows,
+  ] = await Promise.all([
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { in: accountIds } }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { in: accountIds }, createdAt: { gte: todayStart } }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { in: accountIds }, status: { in: ['PENDING', 'PROCESSING'] } }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { in: accountIds }, createdAt: { gte: todayStart }, status: 'SUCCESS' }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { in: accountIds }, status: 'FAILED' }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { in: accountIds }, createdAt: { gte: todayStart }, status: 'FAILED' }, _count: { _all: true } }),
+  ]);
+
+  const totalMap = rowsToCountMap(totalRows, 'accountId');
+  const todayMap = rowsToCountMap(todayRows, 'accountId');
+  const processingMap = rowsToCountMap(processingRows, 'accountId');
+  const todaySuccessMap = rowsToCountMap(todaySuccessRows, 'accountId');
+  const failedMap = rowsToCountMap(failedRows, 'accountId');
+  const todayFailedMap = rowsToCountMap(todayFailedRows, 'accountId');
+
+  return new Map(accountIds.map((id) => [id, {
+    totalCreatives: totalMap.get(id) ?? 0,
+    todayCreatives: todayMap.get(id) ?? 0,
+    processingTasks: processingMap.get(id) ?? 0,
+    todaySuccess: todaySuccessMap.get(id) ?? 0,
+    failedTasks: failedMap.get(id) ?? 0,
+    todayFailed: todayFailedMap.get(id) ?? 0,
+  }]));
+}
+
+async function getApiKeyTaskMetrics(apiKeyIds: string[]) {
+  if (!apiKeyIds.length) return new Map<string, any>();
+  const todayStart = startOfLocalDay();
+  const [
+    totalRows,
+    todayRows,
+    successRows,
+    failedRows,
+    processingRows,
+  ] = await Promise.all([
+    prisma.task.groupBy({ by: ['apiKeyId'], where: { apiKeyId: { in: apiKeyIds } }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['apiKeyId'], where: { apiKeyId: { in: apiKeyIds }, createdAt: { gte: todayStart } }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['apiKeyId'], where: { apiKeyId: { in: apiKeyIds }, status: 'SUCCESS' }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['apiKeyId'], where: { apiKeyId: { in: apiKeyIds }, status: 'FAILED' }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['apiKeyId'], where: { apiKeyId: { in: apiKeyIds }, status: { in: ['PENDING', 'PROCESSING'] } }, _count: { _all: true } }),
+  ]);
+
+  const totalMap = rowsToCountMap(totalRows, 'apiKeyId');
+  const todayMap = rowsToCountMap(todayRows, 'apiKeyId');
+  const successMap = rowsToCountMap(successRows, 'apiKeyId');
+  const failedMap = rowsToCountMap(failedRows, 'apiKeyId');
+  const processingMap = rowsToCountMap(processingRows, 'apiKeyId');
+
+  return new Map(apiKeyIds.map((id) => [id, {
+    total: totalMap.get(id) ?? 0,
+    today: todayMap.get(id) ?? 0,
+    success: successMap.get(id) ?? 0,
+    failed: failedMap.get(id) ?? 0,
+    processing: processingMap.get(id) ?? 0,
+  }]));
+}
+
 function normalizePromptForRisk(value: string) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
@@ -476,8 +554,13 @@ router.post('/accounts/:id/checklogin', async (req: Request, res: Response) => {
 
 // 获取所有账号
 router.get('/accounts', async (req: Request, res: Response) => {
-  const accounts = await prisma.jimengAccount.findMany();
-  res.json(accounts);
+  try {
+    const accounts = await prisma.jimengAccount.findMany({ orderBy: { createdAt: 'asc' } });
+    const metrics = await getAccountTaskMetrics(accounts.map((account) => account.id));
+    res.json(accounts.map((account) => ({ ...account, metrics: metrics.get(account.id) })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 删除账号实例（同时清理本地 homeDir 文件）
@@ -658,13 +741,17 @@ router.get('/native/query-result', async (req: Request, res: Response) => {
 // 生成并分发一个新的 API KEY 用于客户端
 router.post('/apikeys', async (req: Request, res: Response) => {
   const { owner, quota, boundAccountId } = req.body;
+  const parsedQuota = quota === undefined || quota === null || quota === '' ? null : Number(quota);
+  if (parsedQuota !== null && (!Number.isInteger(parsedQuota) || parsedQuota < 0)) {
+    return res.status(400).json({ error: "quota must be a non-negative integer or empty" });
+  }
   const key = 'sk-jm-' + randomBytes(24).toString('hex');
   
   const apikey = await prisma.apiKey.create({
     data: {
       key,
       owner: owner || 'unknown',
-      quota: quota ? parseInt(quota) : null,
+      quota: parsedQuota,
       boundAccountId: boundAccountId || null
     },
     include: { boundAccount: { select: { id: true, name: true } } }
@@ -680,7 +767,11 @@ router.get('/apikeys', async (req: Request, res: Response) => {
       orderBy: { createdAt: 'desc' },
       include: { boundAccount: { select: { id: true, name: true } } }
     });
-    res.json(apikeys);
+    const metrics = await getApiKeyTaskMetrics(apikeys.map((key) => key.id));
+    res.json(apikeys.map((key) => {
+      const usage = metrics.get(key.id) || { total: 0, today: 0, success: 0, failed: 0, processing: 0 };
+      return { ...key, used: usage.total, usage };
+    }));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

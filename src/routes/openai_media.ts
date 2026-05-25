@@ -44,14 +44,43 @@ const dispatchJimengTask = async (
     const command = commandBuilder(tempFilePath);
     console.log(`[Jimeng Dispatcher] Account: ${account.name} -> Executing: ${command}`);
     
-    const dbTask = await prisma.task.create({
-      data: {
-        apiKeyId: (req as any).apiUserId,
-        accountId: account.id,
-        type,
-        prompt: req.body.prompt || req.body.messages?.[0]?.content || "Generating from image",
-      }
-    });
+    let dbTask;
+    try {
+      const apiKeyId = String((req as any).apiUserId);
+      dbTask = await prisma.$transaction(async (tx) => {
+        const apiKey = await tx.apiKey.findUnique({ where: { id: apiKeyId } });
+        if (!apiKey) {
+          const error: any = new Error('Invalid API Key');
+          error.status = 401;
+          throw error;
+        }
+
+        const actualUsed = await tx.task.count({ where: { apiKeyId } });
+        if (apiKey.quota !== null && actualUsed >= apiKey.quota) {
+          const error: any = new Error('API Key quota exceeded');
+          error.status = 429;
+          throw error;
+        }
+
+        const task = await tx.task.create({
+          data: {
+            apiKeyId,
+            accountId: account.id,
+            type,
+            prompt: req.body.prompt || req.body.messages?.[0]?.content || "Generating from image",
+          }
+        });
+        await tx.apiKey.update({
+          where: { id: apiKeyId },
+          data: { used: actualUsed + 1 },
+        });
+        return task;
+      });
+    } catch (usageError: any) {
+      await accountService.releaseAccount(account.id, 'IDLE');
+      if (tempFilePath) cleanupTempFile(tempFilePath);
+      return res.status(usageError.status || 500).json({ error: { message: usageError.message } });
+    }
 
     let submitId = "";
     try {

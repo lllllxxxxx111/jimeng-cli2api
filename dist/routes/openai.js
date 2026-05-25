@@ -1250,14 +1250,29 @@ const dispatchQueuedTask = async (req, options) => {
             throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
         }
         console.log(`[Jimeng Dispatcher] Executing: ${options.command}`);
-        const dbTask = await prisma.task.create({
-            data: {
-                apiKeyId: req.apiUserId,
-                accountId: account.id,
-                type: options.type,
-                model: options.model,
-                prompt: options.prompt,
-            },
+        const apiKeyId = String(req.apiUserId);
+        const dbTask = await prisma.$transaction(async (tx) => {
+            const apiKey = await tx.apiKey.findUnique({ where: { id: apiKeyId } });
+            if (!apiKey)
+                throw httpError(401, 'Invalid API Key');
+            const actualUsed = await tx.task.count({ where: { apiKeyId } });
+            if (apiKey.quota !== null && actualUsed >= apiKey.quota) {
+                throw httpError(429, 'API Key quota exceeded');
+            }
+            const task = await tx.task.create({
+                data: {
+                    apiKeyId,
+                    accountId: account.id,
+                    type: options.type,
+                    model: options.model,
+                    prompt: options.prompt,
+                },
+            });
+            await tx.apiKey.update({
+                where: { id: apiKeyId },
+                data: { used: actualUsed + 1 },
+            });
+            return task;
         });
         try {
             const { stdout } = await (0, cliRunner_1.runJimengCommand)(options.command, account.homeDir);

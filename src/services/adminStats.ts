@@ -121,7 +121,7 @@ export async function collectAdminStats() {
     prisma.task.count({ where: { status: 'PROCESSING' } }),
     prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null } }, _count: { _all: true } }),
     prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null }, createdAt: { gte: todayStart } }, _count: { _all: true } }),
-    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null }, status: 'PROCESSING' }, _count: { _all: true } }),
+    prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null }, status: { in: ['PENDING', 'PROCESSING'] } }, _count: { _all: true } }),
     prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null }, createdAt: { gte: todayStart }, status: 'SUCCESS' }, _count: { _all: true } }),
     prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null }, status: 'FAILED' }, _count: { _all: true } }),
     prisma.task.groupBy({ by: ['accountId'], where: { accountId: { not: null }, createdAt: { gte: todayStart }, status: 'FAILED' }, _count: { _all: true } }),

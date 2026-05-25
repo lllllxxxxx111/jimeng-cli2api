@@ -238,6 +238,18 @@ const processingTaskCount = () => stats.value?.tasks?.processing ?? tasks.value.
 const todaySuccessCount = () => stats.value?.tasks?.today?.success ?? 0;
 const riskScorePercent = (value: number) => `${Math.round((Number(value) || 0) * 100)}%`;
 
+const mergeAccountMetrics = (account: any) => {
+  const statsRow = stats.value?.accounts?.accounts?.find((item: any) => item.id === account.id);
+  return account.metrics || statsRow || {
+    totalCreatives: 0,
+    todayCreatives: 0,
+    processingTasks: 0,
+    todaySuccess: 0,
+    failedTasks: 0,
+    todayFailed: 0,
+  };
+};
+
 const accountStatusLabel = (status: string) => ({
   IDLE: '可用',
   BUSY: '忙碌',
@@ -298,6 +310,8 @@ const operationHealth = () => {
 };
 
 const getAccountMetrics = (accountId: string) => {
+  const account = accounts.value.find((item: any) => item.id === accountId);
+  if (account) return mergeAccountMetrics(account);
   const row = stats.value?.accounts?.accounts?.find((item: any) => item.id === accountId);
   return row || { totalCreatives: 0, todayCreatives: 0, processingTasks: 0, todaySuccess: 0, failedTasks: 0, todayFailed: 0 };
 };
@@ -342,6 +356,14 @@ const navItemClass = (key: string) => currentTab.value === key
 const setTab = (tab: string) => {
   currentTab.value = tab;
   if (tab === 'monitor') fetchStats();
+  if (tab === 'accounts') {
+    fetchAccounts();
+    fetchStats();
+  }
+  if (tab === 'apikeys') {
+    fetchApiKeys();
+    fetchStats();
+  }
   if (tab === 'tasks') fetchTasks(1);
 };
 
@@ -487,8 +509,6 @@ const preferredSdkModels = (models: any[]) => models.filter((item: any) => Strin
 
 const legacySdkModels = (models: any[]) => models.filter((item: any) => !String(item.id || '').startsWith('jimeng-'));
 
-const compatibilitySdkModels = (value: any) => Array.isArray(value?.compatibility?.data) ? value.compatibility.data : [];
-
 const sdkEndpoint = () => {
   if (sdkMode.value === 'models') return { method: 'GET', path: '/v1/models', contentType: 'json' };
   if (sdkMode.value === 'responses-image' || sdkMode.value === 'responses-video') return { method: 'POST', path: '/v1/responses', contentType: 'json' };
@@ -578,6 +598,59 @@ const compactSdkValue = (value: any) => {
 type SdkSummaryGroup = {
   label: string;
   items: string[];
+};
+
+type SdkMediaPreview = {
+  url: string;
+  kind: 'image' | 'video' | 'file';
+  label: string;
+};
+
+const inferSdkMediaKind = (url: string, hint = ''): SdkMediaPreview['kind'] => {
+  const lower = `${url} ${hint}`.toLowerCase();
+  if (/\.(mp4|mov|webm|m4v)(\?|#|$)/.test(lower) || lower.includes('video')) return 'video';
+  if (/\.(png|jpe?g|webp|gif|bmp)(\?|#|$)/.test(lower) || lower.includes('image') || lower.includes('upscale')) return 'image';
+  return 'file';
+};
+
+const sdkMediaTypeHint = (value: any, fallback?: any) => {
+  const taskType = String(value?.task_type || value?.metadata?.task_type || fallback?.task_type || fallback?.metadata?.task_type || '').toLowerCase();
+  const objectType = String(value?.object || fallback?.object || '').toLowerCase();
+  if (taskType.includes('video') || objectType === 'video') return 'video';
+  if (taskType.includes('image') || taskType.includes('upscale')) return 'image';
+  return '';
+};
+
+const sdkMediaPreview = (value: any, fallback?: any): SdkMediaPreview[] => {
+  if (!value) return [];
+  const previews: SdkMediaPreview[] = [];
+  const seen = new Set<string>();
+  const baseHint = sdkMediaTypeHint(value, fallback);
+  const add = (url: string, hint: string, label: string) => {
+    const clean = String(url || '').trim();
+    if (!/^https?:\/\//i.test(clean) || seen.has(clean)) return;
+    seen.add(clean);
+    previews.push({ url: clean, kind: inferSdkMediaKind(clean, `${baseHint} ${hint}`), label });
+  };
+  const visit = (node: any, path: string[] = []) => {
+    if (node === null || node === undefined) return;
+    if (typeof node === 'string') {
+      const keyPath = path.join('.').toLowerCase();
+      if (/(url|result|href|content|image|video|data|output)/.test(keyPath) || /\.(png|jpe?g|webp|gif|mp4|mov|webm|m4v)(\?|#|$)/i.test(node)) {
+        add(node, keyPath, path[path.length - 1] || 'url');
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => visit(item, [...path, String(index)]));
+      return;
+    }
+    if (typeof node === 'object') {
+      Object.entries(node).forEach(([key, item]) => visit(item, [...path, key]));
+    }
+  };
+  visit(value);
+  return previews;
 };
 
 const sdkResponseSummary = (value: any) => {
@@ -803,6 +876,7 @@ const runSdkTest = async () => {
       data = await callOpenAiApi(endpoint.path, { method: endpoint.method, body: form });
     }
     sdkResponse.value = data;
+    refreshOperationalData();
   } catch (error: any) {
     sdkError.value = error.message || '接口测试失败';
     if (error.response) sdkResponse.value = error.response;
@@ -822,6 +896,7 @@ const pollSdkResult = async () => {
   sdkShowRawPollResponse.value = false;
   try {
     sdkPollResponse.value = await callOpenAiApi(path, { method: 'GET' });
+    refreshOperationalData();
   } catch (error: any) {
     sdkError.value = error.message || '轮询失败';
     if (error.response) sdkPollResponse.value = error.response;
@@ -1067,6 +1142,16 @@ const fetchStats = async () => {
   } finally {
     statsLoading.value = false;
   }
+};
+
+const refreshOperationalData = async () => {
+  if (!token.value) return;
+  await Promise.allSettled([
+    fetchStats(),
+    fetchAccounts(),
+    fetchApiKeys(),
+    currentTab.value === 'tasks' ? fetchTasks(taskPage.value) : Promise.resolve(),
+  ]);
 };
 
 const generateApiKey = async () => {
@@ -1501,6 +1586,12 @@ const initData = () => {
 
 onMounted(() => {
   initData();
+  window.setInterval(() => {
+    if (!token.value) return;
+    if (['monitor', 'accounts', 'apikeys', 'tasks', 'sdkTest'].includes(currentTab.value)) {
+      refreshOperationalData();
+    }
+  }, 5000);
 });
 </script>
 
@@ -2045,7 +2136,12 @@ onMounted(() => {
                   <span v-if="key.boundAccount" class="text-xs font-semibold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">{{ key.boundAccount.name }}</span>
                   <span v-else class="text-xs text-slate-400">自动分配</span>
                 </td>
-                <td class="px-6 py-4 text-slate-500 text-xs">{{ key.used || 0 }} / {{ key.quota || '∞' }}</td>
+                <td class="px-6 py-4 text-slate-500 text-xs">
+                  <div class="font-black text-slate-800">{{ key.used || 0 }} / {{ key.quota ?? '∞' }}</div>
+                  <div class="mt-1 text-[11px] text-slate-400 whitespace-nowrap">
+                    今日 {{ key.usage?.today || 0 }} · 成功 {{ key.usage?.success || 0 }} · 处理中 {{ key.usage?.processing || 0 }} · 失败 {{ key.usage?.failed || 0 }}
+                  </div>
+                </td>
                 <td class="px-6 py-4"><span class="text-xs font-bold px-2 py-1 rounded-full" :class="key.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'">{{ key.isActive ? '启用' : '停用' }}</span></td>
                 <td class="px-6 py-4">
                   <div class="flex items-center gap-2">
@@ -2421,6 +2517,23 @@ onMounted(() => {
                   </div>
                 </div>
               </div>
+              <div v-if="sdkMediaPreview(sdkResponse).length" class="border border-slate-200 rounded-xl overflow-hidden">
+                <div class="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                  <p class="text-sm font-black text-slate-800">结果预览</p>
+                  <span class="text-xs font-bold text-slate-400">{{ sdkMediaPreview(sdkResponse).length }} 个文件</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+                  <div v-for="media in sdkMediaPreview(sdkResponse)" :key="media.url" class="border border-slate-100 rounded-xl overflow-hidden bg-slate-50">
+                    <img v-if="media.kind === 'image'" :src="media.url" class="w-full max-h-[360px] object-contain bg-slate-950" loading="lazy" />
+                    <video v-else-if="media.kind === 'video'" :src="media.url" controls class="w-full max-h-[360px] bg-slate-950"></video>
+                    <div v-else class="p-5 text-sm text-slate-600">暂不支持内嵌预览，可打开链接查看。</div>
+                    <div class="p-3 border-t border-slate-100 bg-white flex items-center justify-between gap-3">
+                      <span class="text-xs font-bold text-slate-500 uppercase">{{ media.kind }}</span>
+                      <a :href="media.url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-indigo-600 hover:text-indigo-800 truncate">打开原始链接</a>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <pre v-if="sdkShowRawResponse" class="bg-slate-950 text-slate-200 rounded-xl p-5 text-xs font-mono max-h-[420px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkResponse) }}</pre>
             </div>
             <div v-else class="p-5 text-sm text-slate-500 min-h-[180px] flex items-center">还没有响应。先点击“发送测试请求”。</div>
@@ -2454,6 +2567,23 @@ onMounted(() => {
                     <p class="text-xs font-black text-slate-500 uppercase tracking-wider">{{ group.label }}</p>
                     <div class="flex flex-wrap gap-2">
                       <span v-for="item in group.items" :key="`${group.label}-${item}`" class="text-xs font-bold px-2.5 py-1 rounded-full border" :class="group.label === '模型版本' ? 'text-emerald-700 bg-emerald-50 border-emerald-100' : 'text-indigo-700 bg-indigo-50 border-indigo-100'">{{ item }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-if="sdkMediaPreview(sdkPollResponse, sdkResponse).length" class="border border-slate-200 rounded-xl overflow-hidden">
+                <div class="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                  <p class="text-sm font-black text-slate-800">结果预览</p>
+                  <span class="text-xs font-bold text-slate-400">{{ sdkMediaPreview(sdkPollResponse, sdkResponse).length }} 个文件</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+                  <div v-for="media in sdkMediaPreview(sdkPollResponse, sdkResponse)" :key="media.url" class="border border-slate-100 rounded-xl overflow-hidden bg-slate-50">
+                    <img v-if="media.kind === 'image'" :src="media.url" class="w-full max-h-[360px] object-contain bg-slate-950" loading="lazy" />
+                    <video v-else-if="media.kind === 'video'" :src="media.url" controls class="w-full max-h-[360px] bg-slate-950"></video>
+                    <div v-else class="p-5 text-sm text-slate-600">暂不支持内嵌预览，可打开链接查看。</div>
+                    <div class="p-3 border-t border-slate-100 bg-white flex items-center justify-between gap-3">
+                      <span class="text-xs font-bold text-slate-500 uppercase">{{ media.kind }}</span>
+                      <a :href="media.url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-indigo-600 hover:text-indigo-800 truncate">打开原始链接</a>
                     </div>
                   </div>
                 </div>
