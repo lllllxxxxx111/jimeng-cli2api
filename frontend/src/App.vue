@@ -80,6 +80,7 @@ const sdkMode = ref('models');
 const sdkPrompt = ref('一只赛博朋克机械猫，电影感灯光，细节丰富');
 const sdkImageModel = ref('jimeng-image-5.0');
 const sdkVideoModel = ref('jimeng-video-seedance2.0fast');
+const sdkVideoMode = ref('auto');
 const sdkRatio = ref('16:9');
 const sdkResolution = ref('2k');
 const sdkVideoSize = ref('1280x720');
@@ -466,28 +467,26 @@ const sdkModelOptions = {
     value: `jimeng-image-${model}`,
     label: `jimeng-image-${model}`,
   })),
-  video: ['seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
+  video: ['3.0', '3.0fast', '3.0pro', '3.5pro', 'seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
     value: `jimeng-video-${model}`,
     label: `jimeng-video-${model}`,
   })),
-  frames: ['3.0', '3.5pro', 'seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
-    value: `jimeng-video-frames-${model}`,
-    label: `jimeng-video-frames-${model}`,
-  })),
-  multimodal: ['seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip'].map(model => ({
-    value: `jimeng-video-multimodal-${model}`,
-    label: `jimeng-video-multimodal-${model}`,
-  })),
-  keyframes: [{ value: 'jimeng-video-keyframes', label: 'jimeng-video-keyframes' }],
 };
 
-const sdkVideoModelOptions = () => {
-  return [...sdkModelOptions.video, ...sdkModelOptions.frames, ...sdkModelOptions.multimodal, ...sdkModelOptions.keyframes];
-};
+const sdkVideoModeOptions = [
+  { value: 'auto', label: '自动判断' },
+  { value: 'text2video', label: '文字生成视频' },
+  { value: 'image2video', label: '单图生成视频' },
+  { value: 'frames2video', label: '首尾帧视频' },
+  { value: 'multimodal2video', label: '多图/多模态视频' },
+  { value: 'multiframe2video', label: '多关键帧视频' },
+];
 
 const preferredSdkModels = (models: any[]) => models.filter((item: any) => String(item.id || '').startsWith('jimeng-'));
 
 const legacySdkModels = (models: any[]) => models.filter((item: any) => !String(item.id || '').startsWith('jimeng-'));
+
+const compatibilitySdkModels = (value: any) => Array.isArray(value?.compatibility?.data) ? value.compatibility.data : [];
 
 const sdkEndpoint = () => {
   if (sdkMode.value === 'models') return { method: 'GET', path: '/v1/models', contentType: 'json' };
@@ -523,6 +522,7 @@ const buildSdkPayload = () => {
       model: sdkVideoModel.value,
       input: sdkPrompt.value,
       metadata: {
+        mode: sdkVideoMode.value,
         duration: Number(sdkVideoSeconds.value) || 5,
         ratio: sdkRatio.value,
         video_resolution: sdkVideoResolution.value || undefined,
@@ -539,6 +539,7 @@ const buildSdkPayload = () => {
       size: sdkVideoSize.value,
       seconds: Number(sdkVideoSeconds.value) || 5,
       metadata: {
+        mode: sdkVideoMode.value,
         video_resolution: sdkVideoResolution.value || undefined,
         session,
         ...extra,
@@ -558,7 +559,7 @@ const buildSdkPayload = () => {
     : {
         model: sdkVideoModel.value,
         prompt: sdkPrompt.value,
-        mode: 'text2video',
+        mode: sdkVideoMode.value,
         duration: Number(sdkVideoSeconds.value) || 5,
         ratio: sdkRatio.value,
         video_resolution: sdkVideoResolution.value || undefined,
@@ -2281,9 +2282,16 @@ onMounted(() => {
                 <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">视频模型</label>
                   <select v-model="sdkVideoModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option v-for="model in sdkVideoModelOptions()" :key="model.value" :value="model.value">{{ model.label }}</option>
+                    <option v-for="model in sdkModelOptions.video" :key="model.value" :value="model.value">{{ model.label }}</option>
                   </select>
-                  <p class="text-xs text-slate-400 mt-2">普通视频模型：两张或多张参考图按多图/多模态处理；frames 模型：两张图固定为首尾帧。</p>
+                  <p class="text-xs text-slate-400 mt-2">同一个视频模型支持多个功能，具体功能由模式决定。</p>
+                </div>
+                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                  <label class="block text-sm font-bold text-slate-700 mb-2">功能模式</label>
+                  <select v-model="sdkVideoMode" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <option v-for="mode in sdkVideoModeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
+                  </select>
+                  <p class="text-xs text-slate-400 mt-2">首尾帧、多模态、多关键帧用这里指定；自动判断适合普通文字或单图视频。</p>
                 </div>
                 <div>
                   <label class="block text-sm font-bold text-slate-700 mb-2">比例</label>

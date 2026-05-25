@@ -118,6 +118,7 @@ const RATIO_TO_OPENAI_VIDEO_SIZE = {
     '21:9': '1792x768',
 };
 const UPSCALE_ALIAS_TO_RESOLUTION = {
+    'jimeng-upscale': null,
     'jimeng-upscale-2k': '2k',
     'jimeng-upscale-4k': '4k',
     'jimeng-upscale-8k': '8k',
@@ -438,6 +439,8 @@ const buildModelAliases = () => {
             capabilities.push('text2video');
         if (IMAGE2VIDEO_MODELS.has(model))
             capabilities.push('image2video');
+        if (FRAMES2VIDEO_MODELS.has(model))
+            capabilities.push('frames2video');
         if (MULTIMODAL_MODELS.has(model))
             capabilities.push('multimodal2video');
         const aliases = [];
@@ -467,6 +470,7 @@ const buildModelAliases = () => {
                 default_mode: 'frames2video',
                 description: `Jimeng first/last-frame video model ${model}; exactly two images are required.`,
                 parameters: { frames2video: getVideoModeParameters('frames2video', model) },
+                compatibility_alias: true,
             });
         }
         if (MULTIMODAL_MODELS.has(model)) {
@@ -481,6 +485,7 @@ const buildModelAliases = () => {
                 default_mode: 'multimodal2video',
                 description: `Jimeng multimodal video model ${model}; images, videos, and optional audio are accepted.`,
                 parameters: { multimodal2video: getVideoModeParameters('multimodal2video', model) },
+                compatibility_alias: true,
             });
         }
         return aliases;
@@ -494,14 +499,15 @@ const buildModelAliases = () => {
         cli_model: 'image_upscale',
         capabilities: ['image_upscale'],
         default_mode: 'image_upscale',
-        description: `Jimeng image upscale to ${resolution}`,
+        description: resolution ? `Jimeng image upscale to ${resolution}` : 'Jimeng image upscale; choose resolution_type 2k, 4k, or 8k.',
         parameters: {
             image_upscale: {
                 image: { min: 1, max: 1, max_bytes: IMAGE_MAX_BYTES, extensions: Array.from(IMAGE_EXTS) },
-                resolution_type: [resolution],
+                resolution_type: resolution ? [resolution] : setToArray(UPSCALE_RESOLUTIONS),
                 session: { type: 'integer', min: 0 },
             },
         },
+        compatibility_alias: Boolean(resolution),
     }));
     const keyframeAlias = {
         id: 'jimeng-video-keyframes',
@@ -514,6 +520,7 @@ const buildModelAliases = () => {
         default_mode: 'multiframe2video',
         description: 'Jimeng multi-keyframe video; accepts 2 to 20 images and does not use model_version.',
         parameters: { multiframe2video: getMultiframeParameters() },
+        compatibility_alias: true,
     };
     return [...imageAliases, ...videoAliases, keyframeAlias, ...upscaleAliases];
 };
@@ -528,8 +535,9 @@ const legacyModelEntry = (id, capabilities) => ({
     parameters: getModelParameters(id),
     legacy: true,
 });
-const publicModelList = () => ([
-    ...MODEL_ALIASES,
+const publicModelList = () => MODEL_ALIASES.filter(alias => !alias.compatibility_alias);
+const compatibilityModelList = () => ([
+    ...MODEL_ALIASES.filter(alias => alias.compatibility_alias),
     ...Array.from(MODEL_CAPABILITIES.entries()).map(([id, capabilities]) => legacyModelEntry(id, capabilities)),
 ]);
 const parseJimengModelAlias = (raw) => {
@@ -1331,7 +1339,7 @@ const dispatchUpscaleTask = async (req, body, file) => {
         return await dispatchQueuedTask(req, {
             command,
             type: 'image_upscale',
-            model: aliasId || 'image_upscale',
+            model: aliasId || 'jimeng-upscale',
             prompt: `upscale:${resolutionType}`,
         });
     }
@@ -1625,6 +1633,7 @@ function extractSubmitInfo(stdout) {
     return { submitId, logId };
 }
 router.get('/models', apiKeyAuth, (_req, res) => {
+    const compatibleModels = compatibilityModelList();
     res.json({
         object: 'list',
         global_capabilities: {
@@ -1633,9 +1642,14 @@ router.get('/models', apiKeyAuth, (_req, res) => {
         global_parameters: GLOBAL_MODE_PARAMETERS,
         naming: {
             recommended_prefix: 'jimeng-',
-            rule: 'Use jimeng-* models for Dreamina routing. Legacy raw Dreamina model ids are still accepted for compatibility.',
+            rule: 'Use one jimeng-* model and choose the operation with request parameters such as mode or metadata.operation. Compatibility aliases and raw Dreamina ids are still accepted but hidden from the main model list.',
         },
         data: publicModelList(),
+        compatibility: {
+            object: 'list',
+            count: compatibleModels.length,
+            data: compatibleModels,
+        },
     });
 });
 router.post('/responses', apiKeyAuth, responsesUpload.any(), async (req, res) => {
