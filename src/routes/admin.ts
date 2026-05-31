@@ -12,7 +12,7 @@ import { collectAdminStats } from '../services/adminStats';
 const router = Router();
 const prisma = new PrismaClient();
 const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
-const PROMPT_RISK_LIMIT = 8;
+const PROMPT_RISK_LIMIT = 12;
 const CHECKLOGIN_POLL_SECONDS = 3;
 const CHECKLOGIN_TIMEOUT_MS = 12000;
 const ACCOUNT_CHECK_TIMEOUT_MS = 30000;
@@ -316,7 +316,38 @@ async function getApiKeyTaskMetrics(apiKeyIds: string[]) {
 }
 
 function normalizePromptForRisk(value: string) {
-  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[，。！？、；：“”‘’（）【】《》,.!?;:"'()[\]{}<>]/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function promptRiskTokens(value: string) {
+  const normalized = normalizePromptForRisk(value);
+  const tokens = new Set<string>();
+  const words = normalized.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  for (const word of words) {
+    tokens.add(word);
+    if (/[\u3400-\u9fff]/u.test(word)) {
+      for (let i = 0; i < word.length - 1; i += 1) {
+        tokens.add(word.slice(i, i + 2));
+      }
+    }
+  }
+  return tokens;
+}
+
+function setOverlapScore(leftTokens: Set<string>, rightTokens: Set<string>) {
+  if (!leftTokens.size || !rightTokens.size) return 0;
+  let shared = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) shared += 1;
+  }
+  const union = new Set([...leftTokens, ...rightTokens]).size;
+  const jaccard = union ? shared / union : 0;
+  const coverage = shared / Math.min(leftTokens.size, rightTokens.size);
+  return Math.max(jaccard, coverage * 0.82);
 }
 
 function promptSimilarity(a: string, b: string) {
@@ -328,15 +359,40 @@ function promptSimilarity(a: string, b: string) {
     return Math.min(left.length, right.length) / Math.max(left.length, right.length);
   }
 
-  const leftTokens = new Set(left.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
-  const rightTokens = new Set(right.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
-  if (!leftTokens.size || !rightTokens.size) return 0;
+  return setOverlapScore(promptRiskTokens(left), promptRiskTokens(right));
+}
 
-  let overlap = 0;
-  for (const token of leftTokens) {
-    if (rightTokens.has(token)) overlap += 1;
+function shortReason(value: string) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function summarizeRiskReasons(matches: Array<{ reason: string }>) {
+  const counts = new Map<string, number>();
+  for (const item of matches) {
+    const reason = shortReason(item.reason);
+    if (!reason) continue;
+    counts.set(reason, (counts.get(reason) || 0) + 1);
   }
-  return overlap / Math.max(leftTokens.size, rightTokens.size);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([reason, count]) => ({ reason, count }));
+}
+
+function riskRecommendations(level: string, matches: any[]) {
+  if (level === 'clear') {
+    return [
+      '历史失败库暂未命中相似提示词；仍建议先用低成本参数试跑。',
+      '提交前确认模型、任务类型和账号额度是否匹配。',
+    ];
+  }
+  const actions = [
+    '先打开相似失败记录，确认失败原因是不是提示词本身。',
+    '改写高风险表达，降低敏感词、绝对化描述和可能违规的主体描述。',
+    '保留核心画面目标，拆掉过长修饰词后再提交。',
+  ];
+  if (matches.length >= 3) actions.unshift('命中多条历史失败记录，建议不要直接提交原提示词。');
+  return actions;
 }
 
 router.post('/sys/login', async (req, res) => {
@@ -477,21 +533,24 @@ router.post('/prompt-risk', async (req: Request, res: Response) => {
       },
     });
 
-    const matches = rows
+    const scored = rows
       .map((row) => ({
         ...row,
         similarity: promptSimilarity(prompt, row.prompt),
         reason: row.errorMsg || row.pollErrorMsg || '',
-      }))
-      .filter((row) => row.similarity >= 0.35)
+      }));
+    const matches = scored
+      .filter((row) => row.similarity >= 0.28)
       .sort((a, b) => b.similarity - a.similarity || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
       .slice(0, PROMPT_RISK_LIMIT);
 
     const highest = matches[0]?.similarity || 0;
-    const level = highest >= 0.9 || matches.length >= 3 ? 'high' : highest >= 0.55 ? 'medium' : matches.length > 0 ? 'low' : 'clear';
+    const level = highest >= 0.78 || matches.length >= 4 ? 'high' : highest >= 0.48 || matches.length >= 2 ? 'medium' : matches.length > 0 ? 'low' : 'clear';
     const suggestion = level === 'clear'
-      ? '历史失败记录中未发现相似提示词。'
-      : '发现相似失败记录，建议先改写敏感表达、降低违规风险，再进入排队生成。';
+      ? '历史失败记录中未发现相似提示词；仍建议先用低成本参数试跑。'
+      : level === 'high'
+        ? '命中多条或高度相似的失败记录，不建议直接提交原提示词。'
+        : '发现相似失败记录，建议先复核失败原因并改写提示词。';
 
     res.json({
       prompt,
@@ -499,8 +558,14 @@ router.post('/prompt-risk', async (req: Request, res: Response) => {
       type: type || null,
       level,
       highestSimilarity: highest,
+      matchedCount: matches.length,
+      reviewedCount: rows.length,
+      topReasons: summarizeRiskReasons(matches),
+      recommendations: riskRecommendations(level, matches),
+      thresholds: { low: 0.28, medium: 0.48, high: 0.78 },
       matches,
       suggestion,
+      checkedAt: new Date().toISOString(),
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
