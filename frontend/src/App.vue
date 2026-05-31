@@ -79,6 +79,9 @@ const nativeQuerySubmitId = ref('');
 const nativeQueryDownload = ref(false);
 const nativeQueryDownloadDirName = ref('');
 const nativeShowAdvancedSessions = ref(false);
+const nativeShowTaskRaw = ref(false);
+const nativeShowQueryRaw = ref(false);
+const nativeShowSessionRaw = ref(false);
 const sdkApiKey = ref(localStorage.getItem('sdk_test_api_key') || '');
 const sdkSelectedKeyId = ref('');
 const sdkMode = ref('models');
@@ -100,6 +103,8 @@ const sdkPolling = ref(false);
 const sdkError = ref('');
 const sdkShowRawResponse = ref(false);
 const sdkShowRawPollResponse = ref(false);
+const sdkShowSnippet = ref(false);
+const sdkShowRequestPreview = ref(false);
 
 const currentTab = ref('monitor');
 
@@ -412,6 +417,160 @@ const nativeResultText = (result: any) => {
   return parts.join('\n\n') || JSON.stringify(result, null, 2);
 };
 
+type NativeTaskItem = {
+  submitId: string;
+  status: string;
+  taskType: string;
+  createdAt: string;
+  updatedAt: string;
+  prompt: string;
+  raw: any;
+};
+
+type NativeSessionItem = {
+  id: string;
+  name: string;
+  updatedAt: string;
+  status: string;
+  raw: any;
+};
+
+const nativeParsedRoot = (result: any) => result?.parsed ?? result?.data ?? result?.result ?? result;
+
+const nativeIsObject = (value: any) => value !== null && typeof value === 'object';
+
+const nativeDisplayValue = (value: any) => {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+};
+
+const nativePick = (value: any, keys: string[]) => {
+  if (!nativeIsObject(value) || Array.isArray(value)) return '';
+  for (const key of keys) {
+    const picked = nativeDisplayValue(value[key]);
+    if (picked) return picked;
+  }
+  return '';
+};
+
+const nativePickDeep = (value: any, keys: string[], depth = 0): string => {
+  if (!nativeIsObject(value) || depth > 6) return '';
+  const direct = nativePick(value, keys);
+  if (direct) return direct;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  for (const child of children) {
+    const picked = nativePickDeep(child, keys, depth + 1);
+    if (picked) return picked;
+  }
+  return '';
+};
+
+const nativeFindArray = (value: any, isItem: (item: any) => boolean, depth = 0): any[] => {
+  if (!nativeIsObject(value) || depth > 6) return [];
+  if (Array.isArray(value)) {
+    if (value.some(isItem)) return value.filter(nativeIsObject);
+    for (const item of value) {
+      const found = nativeFindArray(item, isItem, depth + 1);
+      if (found.length) return found;
+    }
+    return [];
+  }
+  for (const child of Object.values(value)) {
+    const found = nativeFindArray(child, isItem, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+};
+
+const nativeTaskStatusLabel = (status: string) => {
+  const value = String(status || '').toLowerCase();
+  if (!value) return '-';
+  if (['success', 'succeeded', 'done', 'completed', 'complete', 'finish', 'finished'].includes(value)) return '已完成';
+  if (['failed', 'fail', 'error', 'canceled', 'cancelled'].includes(value)) return '失败';
+  if (value.includes('queue') || value.includes('pending') || value.includes('wait')) return '排队中';
+  if (value.includes('process') || value.includes('running') || value.includes('generat')) return '生成中';
+  return status;
+};
+
+const nativeTaskStatusClass = (status: string) => {
+  const value = String(status || '').toLowerCase();
+  if (value.includes('success') || value.includes('done') || value.includes('complete') || value.includes('finish')) return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+  if (value.includes('fail') || value.includes('error') || value.includes('cancel')) return 'bg-red-50 text-red-700 border-red-100';
+  if (value.includes('queue') || value.includes('pending') || value.includes('wait')) return 'bg-amber-50 text-amber-700 border-amber-100';
+  if (value.includes('process') || value.includes('running') || value.includes('generat')) return 'bg-blue-50 text-blue-700 border-blue-100';
+  return 'bg-slate-50 text-slate-600 border-slate-100';
+};
+
+const isNativeTaskLike = (item: any) => nativeIsObject(item) && [
+  'submit_id',
+  'submitId',
+  'task_id',
+  'taskId',
+  'gen_status',
+  'gen_task_type',
+  'task_type',
+].some(key => Object.prototype.hasOwnProperty.call(item, key));
+
+const nativeTaskItems = (result: any): NativeTaskItem[] => {
+  const root = nativeParsedRoot(result);
+  const source = nativeFindArray(root, isNativeTaskLike);
+  const items = source.length ? source : (isNativeTaskLike(root) ? [root] : []);
+  return items.map((item: any) => ({
+    submitId: nativePickDeep(item, ['submit_id', 'submitId', 'task_id', 'taskId', 'id']),
+    status: nativePickDeep(item, ['gen_status', 'task_status', 'status', 'state']),
+    taskType: nativePickDeep(item, ['gen_task_type', 'task_type', 'taskType', 'type', 'operation']),
+    createdAt: nativePickDeep(item, ['create_time', 'created_at', 'createdAt', 'submit_time', 'start_time']),
+    updatedAt: nativePickDeep(item, ['update_time', 'updated_at', 'updatedAt', 'finish_time', 'complete_time']),
+    prompt: nativePickDeep(item, ['prompt', 'input', 'text', 'query', 'description']),
+    raw: item,
+  })).filter((item: NativeTaskItem) => item.submitId || item.status || item.taskType);
+};
+
+const isNativeSessionLike = (item: any) => nativeIsObject(item) && [
+  'session_id',
+  'sessionId',
+  'id',
+  'session_name',
+  'sessionName',
+  'name',
+].some(key => Object.prototype.hasOwnProperty.call(item, key));
+
+const nativeSessionItems = (result: any): NativeSessionItem[] => {
+  const root = nativeParsedRoot(result);
+  const source = nativeFindArray(root, isNativeSessionLike);
+  const items = source.length ? source : (isNativeSessionLike(root) ? [root] : []);
+  return items.map((item: any) => ({
+    id: nativePickDeep(item, ['session_id', 'sessionId', 'id']),
+    name: nativePickDeep(item, ['session_name', 'sessionName', 'name', 'title']),
+    updatedAt: nativePickDeep(item, ['updated_at', 'updatedAt', 'update_time', 'create_time', 'created_at']),
+    status: nativePickDeep(item, ['status', 'state']),
+    raw: item,
+  })).filter((item: NativeSessionItem) => item.id || item.name);
+};
+
+const useNativeSubmitId = (submitId: string) => {
+  if (!submitId) return;
+  nativeQuerySubmitId.value = submitId;
+  nativeError.value = '';
+  successMessage.value = '已填入结果查询';
+};
+
+const queryNativeSubmitId = async (submitId: string) => {
+  useNativeSubmitId(submitId);
+  if (submitId) await queryNativeResult();
+};
+
+const useNativeSession = (session: NativeSessionItem) => {
+  if (!session.id) return;
+  nativeSessionId.value = session.id;
+  if (session.name) {
+    nativeSessionNewName.value = session.name;
+    nativeSessionSearchName.value = session.name;
+  }
+  successMessage.value = '已填入会话 ID';
+};
+
 const nativeQuickTaskTypeOptions = [
   { value: '', label: '全部类型' },
   { value: 'text2image', label: '文生图' },
@@ -431,14 +590,46 @@ const nativeQuickStatusOptions = [
   { value: 'failed', label: '失败' },
 ];
 
+const nativeCollectUrls = (result: any) => {
+  const urls = new Set<string>();
+  const addFromText = (text: string) => {
+    const matches = text.match(/https?:\/\/[^\s"'<>)\\]+/g) || [];
+    matches.forEach(url => urls.add(url));
+  };
+  const visit = (value: any, depth = 0) => {
+    if (depth > 8 || value === undefined || value === null) return;
+    if (typeof value === 'string') {
+      addFromText(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(item => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value === 'object') {
+      Object.values(value).forEach(item => visit(item, depth + 1));
+    }
+  };
+  addFromText(nativeResultText(result));
+  visit(nativeParsedRoot(result));
+  return Array.from(urls);
+};
+
 const nativeResultSummary = (result: any) => {
   if (!result) return null;
   const text = nativeResultText(result);
-  const urlMatch = text.match(/https?:\/\/[^\s"'<>)\\]+/);
-  const parsed = result.parsed || result.result || result.data || {};
+  const parsed = nativeParsedRoot(result) || {};
+  const urls = nativeCollectUrls(result);
   return {
-    url: urlMatch?.[0] || '',
-    submitId: result.submit_id || result.submitId || parsed.submit_id || parsed.task_id || '',
+    urls,
+    url: urls[0] || '',
+    submitId: nativePickDeep(parsed, ['submit_id', 'submitId', 'task_id', 'taskId', 'id']) || nativePickDeep(result, ['submit_id', 'submitId', 'task_id', 'taskId']),
+    status: nativePickDeep(parsed, ['gen_status', 'task_status', 'status', 'state']),
+    taskType: nativePickDeep(parsed, ['gen_task_type', 'task_type', 'taskType', 'type', 'operation']),
+    credit: nativePickDeep(parsed, ['credit_count', 'creditCount', 'credit', 'cost']),
+    queue: nativePickDeep(parsed, ['queue_info', 'queueInfo', 'queue', 'queue_position', 'position', 'wait_time']),
+    downloadDir: nativePickDeep(result, ['downloadDir']) || nativePickDeep(parsed, ['download_dir', 'downloadDir']),
+    localPath: nativePickDeep(parsed, ['local_path', 'localPath', 'file_path', 'download_path', 'path']),
     raw: text,
   };
 };
@@ -480,14 +671,30 @@ const useSelectedSdkKey = () => {
   sdkError.value = '';
 };
 
-const sdkModeLabel = () => ({
-  'models': '模型列表',
-  'responses-image': 'Responses 文生图',
-  'responses-video': 'Responses 生视频',
-  'videos-create': 'Videos SDK',
-  'legacy-image': '老接口生图',
-  'legacy-video': '老接口生视频',
-}[sdkMode.value] || sdkMode.value);
+const sdkModeOptions = [
+  { value: 'models', label: '模型列表', endpoint: 'GET /v1/models', cost: '不消耗额度', hint: '先用它验证 Key 和服务可用性。' },
+  { value: 'responses-image', label: 'Responses 文生图', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: 'OpenAI SDK 推荐入口，返回 resp_*。' },
+  { value: 'responses-video', label: 'Responses 生视频', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: '用 metadata 指定视频模式和清晰度。' },
+  { value: 'videos-create', label: 'Videos SDK', endpoint: 'POST /v1/videos', cost: '会创建真实任务', hint: '兼容 OpenAI videos.create / retrieve。' },
+  { value: 'legacy-image', label: '老接口生图', endpoint: 'POST /v1/images/generations', cost: '会创建真实任务', hint: '保留给旧客户端或表单请求。' },
+  { value: 'legacy-video', label: '老接口生视频', endpoint: 'POST /v1/videos/generations', cost: '会创建真实任务', hint: '旧版视频表单入口。' },
+];
+
+const sdkModeConfig = () => sdkModeOptions.find(item => item.value === sdkMode.value) || sdkModeOptions[0];
+
+const sdkModeLabel = () => sdkModeConfig().label;
+
+const sdkCostLabel = () => sdkModeConfig().cost;
+
+const sdkNextActionLabel = () => {
+  if (!activeSdkApiKey()) return '先配置完整 API Key';
+  if (sdkLoading.value) return '正在发送请求';
+  if (sdkPolling.value) return '正在轮询结果';
+  if (!sdkResponse.value) return '发送测试请求';
+  if (pollPathForSdkResponse(sdkResponse.value) && !sdkPollResponse.value) return '轮询结果';
+  if (sdkTaskPreviewUrl(sdkPollResponse.value || sdkResponse.value)) return '打开预览或去任务页';
+  return '查看摘要或展开 JSON';
+};
 
 const parseSdkMetadata = () => {
   if (!sdkMetadataJson.value.trim()) return {};
@@ -1495,7 +1702,10 @@ const fetchNativeSessions = async () => {
     });
     const res = await authFetch(`/admin/native/sessions?${params}`);
     const data = await res.json();
-    if (res.ok) nativeSessionsResult.value = data;
+    if (res.ok) {
+      nativeSessionsResult.value = data;
+      nativeShowSessionRaw.value = false;
+    }
     else nativeError.value = data.error || '查询 CLI 会话失败';
   } catch (e: any) {
     nativeError.value = e.message;
@@ -1517,6 +1727,7 @@ const createNativeSession = async () => {
     if (res.ok) {
       nativeSessionsResult.value = data;
       nativeSessionName.value = '';
+      nativeShowSessionRaw.value = false;
     } else {
       nativeError.value = data.error || '创建 CLI 会话失败';
     }
@@ -1538,8 +1749,10 @@ const searchNativeSession = async () => {
     });
     const res = await authFetch(`/admin/native/sessions/search?${params}`);
     const data = await res.json();
-    if (res.ok) nativeSessionsResult.value = data;
-    else nativeError.value = data.error || '搜索 CLI 会话失败';
+    if (res.ok) {
+      nativeSessionsResult.value = data;
+      nativeShowSessionRaw.value = false;
+    } else nativeError.value = data.error || '搜索 CLI 会话失败';
   } catch (e: any) {
     nativeError.value = e.message;
   } finally {
@@ -1557,8 +1770,10 @@ const renameNativeSession = async () => {
       body: JSON.stringify({ accountId: nativeAccountId.value, name: nativeSessionNewName.value }),
     });
     const data = await res.json();
-    if (res.ok) nativeSessionsResult.value = data;
-    else nativeError.value = data.error || '重命名 CLI 会话失败';
+    if (res.ok) {
+      nativeSessionsResult.value = data;
+      nativeShowSessionRaw.value = false;
+    } else nativeError.value = data.error || '重命名 CLI 会话失败';
   } catch (e: any) {
     nativeError.value = e.message;
   } finally {
@@ -1577,8 +1792,10 @@ const deleteNativeSession = async () => {
       body: JSON.stringify({ accountId: nativeAccountId.value }),
     });
     const data = await res.json();
-    if (res.ok) nativeSessionsResult.value = data;
-    else nativeError.value = data.error || '删除 CLI 会话失败';
+    if (res.ok) {
+      nativeSessionsResult.value = data;
+      nativeShowSessionRaw.value = false;
+    } else nativeError.value = data.error || '删除 CLI 会话失败';
   } catch (e: any) {
     nativeError.value = e.message;
   } finally {
@@ -1601,7 +1818,10 @@ const fetchNativeTasks = async () => {
     if (nativeTaskSubmitId.value) params.set('submit_id', nativeTaskSubmitId.value);
     const res = await authFetch(`/admin/native/tasks?${params}`);
     const data = await res.json();
-    if (res.ok) nativeTasksResult.value = data;
+    if (res.ok) {
+      nativeTasksResult.value = data;
+      nativeShowTaskRaw.value = false;
+    }
     else nativeError.value = data.error || '查询 CLI 任务失败';
   } catch (e: any) {
     nativeError.value = e.message;
@@ -1623,7 +1843,10 @@ const queryNativeResult = async () => {
     if (nativeQueryDownloadDirName.value) params.set('downloadDirName', nativeQueryDownloadDirName.value);
     const res = await authFetch(`/admin/native/query-result?${params}`);
     const data = await res.json();
-    if (res.ok) nativeQueryResult.value = data;
+    if (res.ok) {
+      nativeQueryResult.value = data;
+      nativeShowQueryRaw.value = false;
+    }
     else nativeError.value = data.error || '查询 CLI 原生结果失败';
   } catch (e: any) {
     nativeError.value = e.message;
@@ -2307,11 +2530,41 @@ onMounted(() => {
             </div>
 
             <div v-if="nativeTasksResult" class="rounded-xl border border-slate-200 overflow-hidden">
-              <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                <p class="text-sm font-black text-slate-800">查询结果</p>
-                <button @click="nativeCopy(nativeResultText(nativeTasksResult))" class="text-xs font-bold text-indigo-600 hover:text-indigo-800">复制原始结果</button>
+              <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p class="text-sm font-black text-slate-800">查询结果</p>
+                  <p class="text-xs text-slate-400 mt-1">{{ nativeTaskItems(nativeTasksResult).length ? `解析到 ${nativeTaskItems(nativeTasksResult).length} 条任务` : '没有解析到结构化任务，保留原始输出' }}</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button @click="nativeShowTaskRaw = !nativeShowTaskRaw" class="text-xs font-bold text-slate-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg">{{ nativeShowTaskRaw ? '收起原始结果' : '展开原始结果' }}</button>
+                  <button @click="nativeCopy(nativeResultText(nativeTasksResult))" class="text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg">复制全部</button>
+                </div>
               </div>
-              <pre class="bg-slate-950 text-slate-200 p-4 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeTasksResult) }}</pre>
+              <div v-if="nativeTaskItems(nativeTasksResult).length" class="divide-y divide-slate-100 bg-white">
+                <div v-for="task in nativeTaskItems(nativeTasksResult)" :key="task.submitId || JSON.stringify(task.raw).slice(0, 80)" class="p-4 space-y-3">
+                  <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-3">
+                    <div class="min-w-0">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-xs font-black px-2.5 py-1 rounded-full border" :class="nativeTaskStatusClass(task.status)">{{ nativeTaskStatusLabel(task.status) }}</span>
+                        <span v-if="task.taskType" class="text-xs font-bold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full">{{ task.taskType }}</span>
+                      </div>
+                      <p class="font-mono text-xs text-slate-900 mt-2 break-all">{{ task.submitId || '缺少 submit_id' }}</p>
+                      <p v-if="task.prompt" class="text-sm text-slate-500 mt-2 line-clamp-2 break-words">{{ task.prompt }}</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 shrink-0">
+                      <button @click="nativeCopy(task.submitId)" :disabled="!task.submitId" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制 ID</button>
+                      <button @click="useNativeSubmitId(task.submitId)" :disabled="!task.submitId" class="text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 px-3 py-1.5 rounded-lg">填入查询</button>
+                      <button @click="queryNativeSubmitId(task.submitId)" :disabled="!task.submitId || nativeLoading === 'query'" class="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">直接查询</button>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-500">
+                    <div v-if="task.createdAt" class="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">创建：{{ task.createdAt }}</div>
+                    <div v-if="task.updatedAt" class="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">更新：{{ task.updatedAt }}</div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="p-4 text-sm text-slate-500 bg-white">这次 CLI 返回里没有可识别的任务数组，可以展开原始结果检查字段。</div>
+              <pre v-if="nativeShowTaskRaw" class="bg-slate-950 text-slate-200 p-4 text-xs font-mono max-h-[360px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeTasksResult) }}</pre>
             </div>
             <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">点击“刷新最近任务”后，这里会显示 CLI 返回的任务列表。看到 submit_id 后可以复制到右侧查询最终结果。</div>
           </div>
@@ -2336,15 +2589,62 @@ onMounted(() => {
 
             <div v-if="nativeResultSummary(nativeQueryResult)" class="rounded-xl border border-slate-200 overflow-hidden">
               <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-                <p class="text-sm font-black text-slate-800">最终结果</p>
+                <div>
+                  <p class="text-sm font-black text-slate-800">最终结果</p>
+                  <p class="text-xs text-slate-400 mt-1">{{ nativeResultSummary(nativeQueryResult)?.status ? `官方状态：${nativeTaskStatusLabel(nativeResultSummary(nativeQueryResult)?.status || '')}` : '默认显示可操作字段，原始输出按需展开' }}</p>
+                </div>
                 <div class="flex flex-wrap gap-2">
                   <button v-if="nativeResultSummary(nativeQueryResult)?.url" @click="nativeCopy(nativeResultSummary(nativeQueryResult)?.url || '')" class="text-xs font-bold text-indigo-600 bg-white border border-indigo-100 px-3 py-1.5 rounded-lg">复制链接</button>
                   <a v-if="nativeResultSummary(nativeQueryResult)?.url" :href="nativeResultSummary(nativeQueryResult)?.url" target="_blank" class="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-lg">打开结果</a>
+                  <button @click="nativeShowQueryRaw = !nativeShowQueryRaw" class="text-xs font-bold text-slate-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg">{{ nativeShowQueryRaw ? '收起原始结果' : '展开原始结果' }}</button>
                   <button @click="nativeCopy(nativeResultText(nativeQueryResult))" class="text-xs font-bold text-slate-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg">复制全部</button>
                 </div>
               </div>
-              <div v-if="nativeResultSummary(nativeQueryResult)?.url" class="px-4 py-3 bg-emerald-50 border-b border-emerald-100 text-xs text-emerald-800 break-all">{{ nativeResultSummary(nativeQueryResult)?.url }}</div>
-              <pre class="bg-slate-950 text-slate-200 p-4 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeQueryResult) }}</pre>
+              <div class="p-4 space-y-4 bg-white">
+                <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                  <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 min-w-0">
+                    <p class="text-xs font-bold text-slate-500">submit_id</p>
+                    <p class="text-sm font-black text-slate-900 mt-1 break-all">{{ nativeResultSummary(nativeQueryResult)?.submitId || nativeQuerySubmitId || '-' }}</p>
+                  </div>
+                  <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 min-w-0">
+                    <p class="text-xs font-bold text-slate-500">状态</p>
+                    <p class="text-sm font-black text-slate-900 mt-1">{{ nativeTaskStatusLabel(nativeResultSummary(nativeQueryResult)?.status || '') }}</p>
+                  </div>
+                  <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 min-w-0">
+                    <p class="text-xs font-bold text-slate-500">消耗/排队</p>
+                    <p class="text-sm font-black text-slate-900 mt-1 break-words">{{ nativeResultSummary(nativeQueryResult)?.credit || nativeResultSummary(nativeQueryResult)?.queue || '-' }}</p>
+                  </div>
+                  <div v-if="nativeResultSummary(nativeQueryResult)?.taskType" class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 min-w-0">
+                    <p class="text-xs font-bold text-slate-500">类型</p>
+                    <p class="text-sm font-black text-slate-900 mt-1 break-words">{{ nativeResultSummary(nativeQueryResult)?.taskType }}</p>
+                  </div>
+                  <div v-if="nativeResultSummary(nativeQueryResult)?.downloadDir" class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 min-w-0">
+                    <p class="text-xs font-bold text-slate-500">下载目录</p>
+                    <p class="text-sm font-black text-slate-900 mt-1 break-all">{{ nativeResultSummary(nativeQueryResult)?.downloadDir }}</p>
+                  </div>
+                  <div v-if="nativeResultSummary(nativeQueryResult)?.localPath" class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 min-w-0">
+                    <p class="text-xs font-bold text-slate-500">本地文件</p>
+                    <p class="text-sm font-black text-slate-900 mt-1 break-all">{{ nativeResultSummary(nativeQueryResult)?.localPath }}</p>
+                  </div>
+                </div>
+                <div v-if="nativeResultSummary(nativeQueryResult)?.urls.length" class="rounded-xl border border-emerald-100 bg-emerald-50 overflow-hidden">
+                  <div class="px-4 py-3 border-b border-emerald-100 flex items-center justify-between">
+                    <p class="text-sm font-black text-emerald-900">结果链接</p>
+                    <span class="text-xs font-bold text-emerald-700">{{ nativeResultSummary(nativeQueryResult)?.urls.length }} 个</span>
+                  </div>
+                  <div class="divide-y divide-emerald-100">
+                    <div v-for="url in nativeResultSummary(nativeQueryResult)?.urls" :key="url" class="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                      <p class="text-xs text-emerald-800 break-all font-mono">{{ url }}</p>
+                      <div class="flex gap-2 shrink-0">
+                        <button @click="nativeCopy(url)" class="text-xs font-bold text-emerald-700 bg-white border border-emerald-100 px-3 py-1.5 rounded-lg">复制</button>
+                        <a :href="url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 bg-white border border-emerald-100 px-3 py-1.5 rounded-lg">打开</a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">暂时没有解析到结果链接；如果状态仍在排队或生成中，可以稍后再次查询。</div>
+              </div>
+              <pre v-if="nativeShowQueryRaw" class="bg-slate-950 text-slate-200 p-4 text-xs font-mono max-h-[360px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeQueryResult) }}</pre>
             </div>
             <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">这里会显示 query_result 的最终链接、下载目录和原始返回。没有 submit_id 时先刷新左侧最近任务。</div>
           </div>
@@ -2382,7 +2682,33 @@ onMounted(() => {
             </div>
           </div>
 
-          <pre v-if="nativeSessionsResult" class="bg-slate-950 text-slate-200 rounded-xl p-4 text-xs font-mono min-h-[180px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeSessionsResult) }}</pre>
+          <div v-if="nativeSessionsResult" class="rounded-xl border border-slate-200 overflow-hidden">
+            <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p class="text-sm font-black text-slate-800">会话结果</p>
+                <p class="text-xs text-slate-400 mt-1">{{ nativeSessionItems(nativeSessionsResult).length ? `解析到 ${nativeSessionItems(nativeSessionsResult).length} 个会话` : '没有解析到结构化会话，保留原始输出' }}</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button @click="nativeShowSessionRaw = !nativeShowSessionRaw" class="text-xs font-bold text-slate-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg">{{ nativeShowSessionRaw ? '收起原始结果' : '展开原始结果' }}</button>
+                <button @click="nativeCopy(nativeResultText(nativeSessionsResult))" class="text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg">复制全部</button>
+              </div>
+            </div>
+            <div v-if="nativeSessionItems(nativeSessionsResult).length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 p-4 bg-white">
+              <div v-for="session in nativeSessionItems(nativeSessionsResult)" :key="session.id || session.name" class="rounded-xl border border-slate-100 bg-slate-50 p-4 min-w-0">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="text-xs font-bold text-slate-500">会话 ID</p>
+                    <p class="font-mono text-sm font-black text-slate-900 mt-1 break-all">{{ session.id || '-' }}</p>
+                    <p class="text-sm text-slate-600 mt-2 truncate">{{ session.name || '未命名会话' }}</p>
+                  </div>
+                  <button @click="useNativeSession(session)" :disabled="!session.id" class="text-xs font-bold text-indigo-600 bg-white border border-indigo-100 px-3 py-1.5 rounded-lg disabled:opacity-40 shrink-0">填入</button>
+                </div>
+                <p v-if="session.updatedAt || session.status" class="text-xs text-slate-400 mt-3 break-words">{{ session.status || '' }} {{ session.updatedAt || '' }}</p>
+              </div>
+            </div>
+            <div v-else class="p-4 text-sm text-slate-500 bg-white">这次 CLI 返回里没有可识别的会话列表，可以展开原始结果检查字段。</div>
+            <pre v-if="nativeShowSessionRaw" class="bg-slate-950 text-slate-200 p-4 text-xs font-mono max-h-[320px] overflow-auto whitespace-pre-wrap">{{ nativeResultText(nativeSessionsResult) }}</pre>
+          </div>
         </div>
       </div>
 
@@ -2397,23 +2723,31 @@ onMounted(() => {
                   <h3 class="text-2xl font-black text-slate-900 mt-1">接口测试台</h3>
                   <p class="text-sm text-slate-500 mt-2 leading-6">这里直接调用当前服务的 <code class="bg-slate-100 px-1 rounded font-mono">/v1</code> 接口。生成类请求会消耗账号额度，建议先用“模型列表”验证 Key。</p>
                 </div>
-                <div class="flex flex-wrap gap-2">
-                  <button @click="runSdkTest" :disabled="sdkLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkLoading ? '请求中...' : '发送测试请求' }}</button>
-                  <button @click="pollSdkResult" :disabled="sdkPolling || !pollPathForSdkResponse(sdkResponse)" class="bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkPolling ? '轮询中...' : '轮询结果' }}</button>
+                <div class="flex flex-wrap gap-2 w-full xl:w-auto">
+                  <button @click="runSdkTest" :disabled="sdkLoading" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkLoading ? '请求中...' : '发送测试请求' }}</button>
+                  <button @click="pollSdkResult" :disabled="sdkPolling || !pollPathForSdkResponse(sdkResponse)" class="w-full sm:w-auto bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkPolling ? '轮询中...' : '轮询结果' }}</button>
                 </div>
               </div>
 
-              <div class="grid grid-cols-1 xl:grid-cols-[260px_1fr] gap-4">
+              <div class="space-y-4">
                 <div>
                   <label class="block text-sm font-bold text-slate-700 mb-2">测试模式</label>
-                  <select v-model="sdkMode" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option value="models">GET /v1/models</option>
-                    <option value="responses-image">Responses 文生图</option>
-                    <option value="responses-video">Responses 文生视频</option>
-                    <option value="videos-create">OpenAI Videos 创建</option>
-                    <option value="legacy-image">老接口 /images/generations</option>
-                    <option value="legacy-video">老接口 /videos/generations</option>
-                  </select>
+                  <div class="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-2">
+                    <button
+                      v-for="mode in sdkModeOptions"
+                      :key="mode.value"
+                      @click="sdkMode = mode.value"
+                      class="text-left border px-4 py-3 rounded-xl transition min-h-[92px]"
+                      :class="sdkMode === mode.value ? 'border-indigo-500 bg-indigo-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'"
+                    >
+                      <div class="flex items-start justify-between gap-3">
+                        <p class="text-sm font-black text-slate-900">{{ mode.label }}</p>
+                        <span class="text-[11px] font-black px-2 py-0.5 rounded-full" :class="mode.value === 'models' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">{{ mode.cost }}</span>
+                      </div>
+                      <p class="font-mono text-[11px] text-slate-400 mt-2 break-all">{{ mode.endpoint }}</p>
+                      <p class="text-xs text-slate-500 mt-2 leading-5">{{ mode.hint }}</p>
+                    </button>
+                  </div>
                 </div>
                 <div>
                   <label class="block text-sm font-bold text-slate-700 mb-2">测试 API Key</label>
@@ -2522,10 +2856,26 @@ onMounted(() => {
                     <p class="font-black mt-1">{{ activeSdkApiKey() ? '已配置' : '未配置' }}</p>
                   </div>
                 </div>
+                <div class="mt-2 bg-white/10 p-3 rounded-lg text-xs">
+                  <p class="text-slate-400">下一步</p>
+                  <p class="font-black mt-1">{{ sdkNextActionLabel() }}</p>
+                </div>
+                <div class="mt-2 bg-white/10 p-3 rounded-lg text-xs">
+                  <p class="text-slate-400">消耗</p>
+                  <p class="font-black mt-1">{{ sdkCostLabel() }}</p>
+                </div>
+                <div v-if="extractTaskIdFromSdkResponse(sdkResponse)" class="mt-2 bg-white/10 p-3 rounded-lg text-xs min-w-0">
+                  <p class="text-slate-400">任务 ID</p>
+                  <p class="font-mono font-black mt-1 break-all">{{ extractTaskIdFromSdkResponse(sdkResponse) }}</p>
+                </div>
+                <div v-if="pollPathForSdkResponse(sdkResponse)" class="mt-2 bg-white/10 p-3 rounded-lg text-xs min-w-0">
+                  <p class="text-slate-400">轮询地址</p>
+                  <p class="font-mono font-black mt-1 break-all">{{ pollPathForSdkResponse(sdkResponse) }}</p>
+                </div>
               </div>
               <div class="bg-amber-50 border border-amber-100 p-4 text-sm text-amber-800 leading-6">
-                <p class="font-black mb-1">测试提示</p>
-                <p>“模型列表”不消耗额度。Responses、Videos 和老接口会提交真实生成任务，并占用一个即梦账号执行。</p>
+                <p class="font-black mb-1">测试顺序</p>
+                <p>先测模型列表，再切到生成模式提交；返回任务 ID 后直接轮询，成功后用预览代理打开结果。</p>
               </div>
             </div>
           </div>
@@ -2533,30 +2883,59 @@ onMounted(() => {
 
         <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
           <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
-            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 class="font-black text-slate-900">OpenAI SDK 示例</h3>
-              <button @click="nativeCopy(sdkSnippet())" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+            <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 class="font-black text-slate-900">OpenAI SDK 示例</h3>
+                <p class="text-xs text-slate-400 mt-1">默认折叠，避免占掉结果区域。</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button @click="sdkShowSnippet = !sdkShowSnippet" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded-lg">{{ sdkShowSnippet ? '收起示例' : '展开示例' }}</button>
+                <button @click="nativeCopy(sdkSnippet())" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+              </div>
             </div>
-            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ sdkSnippet() }}</pre>
+            <div v-if="!sdkShowSnippet" class="p-5 text-sm text-slate-500 min-h-[112px] flex items-center">
+              当前 baseURL：<span class="font-mono text-slate-800 ml-1 break-all">{{ sdkBaseUrl() }}</span>
+            </div>
+            <pre v-else class="bg-slate-950 text-slate-200 p-5 text-xs font-mono max-h-[360px] overflow-auto whitespace-pre-wrap">{{ sdkSnippet() }}</pre>
           </div>
 
           <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
-            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 class="font-black text-slate-900">请求预览</h3>
-              <button @click="nativeCopy(jsonText(sdkRequestPreview()))" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+            <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 class="font-black text-slate-900">请求预览</h3>
+                <p class="text-xs text-slate-400 mt-1">{{ sdkEndpoint().method }} {{ sdkEndpoint().path }}</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button @click="sdkShowRequestPreview = !sdkShowRequestPreview" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded-lg">{{ sdkShowRequestPreview ? '收起请求' : '展开请求' }}</button>
+                <button @click="nativeCopy(jsonText(sdkRequestPreview()))" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+              </div>
             </div>
-            <pre class="bg-slate-950 text-slate-200 p-5 text-xs font-mono min-h-[260px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkRequestPreview()) }}</pre>
+            <div v-if="!sdkShowRequestPreview" class="p-5 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                <p class="text-xs font-bold text-slate-500">方法</p>
+                <p class="font-black text-slate-900 mt-1">{{ sdkEndpoint().method }}</p>
+              </div>
+              <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                <p class="text-xs font-bold text-slate-500">Body</p>
+                <p class="font-black text-slate-900 mt-1">{{ sdkMode === 'models' ? '无' : sdkEndpoint().contentType }}</p>
+              </div>
+              <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                <p class="text-xs font-bold text-slate-500">Key</p>
+                <p class="font-black text-slate-900 mt-1">{{ activeSdkApiKey() ? '已配置' : '未配置' }}</p>
+              </div>
+            </div>
+            <pre v-else class="bg-slate-950 text-slate-200 p-5 text-xs font-mono max-h-[360px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkRequestPreview()) }}</pre>
           </div>
         </div>
 
         <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
           <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
-            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 class="font-black text-slate-900">提交响应</h3>
                 <p class="text-xs text-slate-400 mt-1">默认显示摘要，完整 JSON 可按需展开</p>
               </div>
-              <div class="flex gap-2">
+              <div class="flex flex-wrap gap-2">
                 <a v-if="sdkTaskPreviewUrl(sdkResponse)" :href="sdkTaskPreviewUrl(sdkResponse)" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg">打开预览</a>
                 <button v-if="extractTaskIdFromSdkResponse(sdkResponse)" @click="openSdkTaskInAdmin" class="text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">去任务页</button>
                 <button @click="sdkShowRawResponse = !sdkShowRawResponse" :disabled="!sdkResponse" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-40 px-3 py-1.5 rounded-lg">{{ sdkShowRawResponse ? '收起 JSON' : '展开 JSON' }}</button>
@@ -2609,12 +2988,12 @@ onMounted(() => {
           </div>
 
           <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
-            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 class="font-black text-slate-900">轮询响应</h3>
                 <p class="text-xs text-slate-400 mt-1">{{ pollPathForSdkResponse(sdkResponse) || '提交成功后显示轮询地址' }}</p>
               </div>
-              <div class="flex gap-2">
+              <div class="flex flex-wrap gap-2">
                 <a v-if="sdkTaskPreviewUrl(sdkPollResponse || sdkResponse)" :href="sdkTaskPreviewUrl(sdkPollResponse || sdkResponse)" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg">打开预览</a>
                 <button @click="sdkShowRawPollResponse = !sdkShowRawPollResponse" :disabled="!sdkPollResponse" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-40 px-3 py-1.5 rounded-lg">{{ sdkShowRawPollResponse ? '收起 JSON' : '展开 JSON' }}</button>
                 <button @click="nativeCopy(jsonText(sdkPollResponse))" :disabled="!sdkPollResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>

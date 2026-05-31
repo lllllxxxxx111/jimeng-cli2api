@@ -121,16 +121,32 @@ const validateSessionId = (value) => {
     return String(id);
 };
 const parseCliJson = (stdout) => {
-    const start = stdout.indexOf('{');
-    const end = stdout.lastIndexOf('}');
-    if (start < 0 || end <= start)
+    const text = stdout.trim();
+    if (!text)
         return null;
-    try {
-        return JSON.parse(stdout.slice(start, end + 1));
+    const tryParse = (candidate) => {
+        try {
+            return JSON.parse(candidate);
+        }
+        catch {
+            return undefined;
+        }
+    };
+    const direct = tryParse(text);
+    if (direct !== undefined)
+        return direct;
+    const spans = [
+        { start: stdout.indexOf('['), end: stdout.lastIndexOf(']') },
+        { start: stdout.indexOf('{'), end: stdout.lastIndexOf('}') },
+    ]
+        .filter(({ start, end }) => start >= 0 && end > start)
+        .sort((a, b) => a.start - b.start || b.end - a.end);
+    for (const { start, end } of spans) {
+        const parsed = tryParse(stdout.slice(start, end + 1));
+        if (parsed !== undefined)
+            return parsed;
     }
-    catch {
-        return null;
-    }
+    return null;
 };
 const parseNativeDownloadFlag = (value) => {
     const text = getScalar(value).toLowerCase();
