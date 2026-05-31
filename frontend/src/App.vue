@@ -59,6 +59,8 @@ const riskType = ref('');
 const riskLoading = ref(false);
 const riskResult = ref<any>(null);
 const riskError = ref('');
+const riskShowAllMatches = ref(false);
+const riskShowAllReasons = ref(false);
 const nativeAccountId = ref('');
 const nativeLoading = ref('');
 const nativeError = ref('');
@@ -247,17 +249,32 @@ const processingTaskCount = () => stats.value?.tasks?.processing ?? tasks.value.
 const todaySuccessCount = () => stats.value?.tasks?.today?.success ?? 0;
 const riskScorePercent = (value: number) => `${Math.round((Number(value) || 0) * 100)}%`;
 const riskLevelClass = (level: string) => ({
-  clear: 'text-emerald-300 bg-emerald-400/10 border-emerald-400/20',
-  low: 'text-sky-300 bg-sky-400/10 border-sky-400/20',
-  medium: 'text-amber-300 bg-amber-400/10 border-amber-400/20',
-  high: 'text-red-300 bg-red-400/10 border-red-400/20',
-}[level] || 'text-slate-300 bg-white/10 border-white/10');
+  clear: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+  low: 'text-sky-700 bg-sky-50 border-sky-200',
+  medium: 'text-amber-700 bg-amber-50 border-amber-200',
+  high: 'text-red-700 bg-red-50 border-red-200',
+}[level] || 'text-slate-700 bg-slate-50 border-slate-200');
+const riskPanelAccentClass = (level: string) => ({
+  clear: 'border-emerald-200',
+  low: 'border-sky-200',
+  medium: 'border-amber-200',
+  high: 'border-red-200',
+}[level] || 'border-slate-200');
 const riskAccentClass = (level: string) => ({
   clear: 'bg-emerald-400',
   low: 'bg-sky-400',
   medium: 'bg-amber-400',
   high: 'bg-red-400',
 }[level] || 'bg-slate-400');
+const riskSimilarityLevel = (value: number) => {
+  const score = Number(value) || 0;
+  if (score >= 0.78) return 'high';
+  if (score >= 0.48) return 'medium';
+  if (score >= 0.28) return 'low';
+  return 'clear';
+};
+const riskSimilarityClass = (value: number) => riskLevelClass(riskSimilarityLevel(value));
+const riskSimilarityBarClass = (value: number) => riskAccentClass(riskSimilarityLevel(value));
 const riskActionLabel = (level: string) => ({
   clear: '可以试跑',
   low: '谨慎提交',
@@ -1557,6 +1574,8 @@ const openRiskWithPrompt = (prompt: string, model = '', type = '') => {
 const checkPromptRisk = async () => {
   riskError.value = '';
   riskResult.value = null;
+  riskShowAllMatches.value = false;
+  riskShowAllReasons.value = false;
   if (!riskPrompt.value.trim()) {
     riskError.value = '请输入要预检的提示词';
     return;
@@ -1591,6 +1610,8 @@ const clearPromptRisk = () => {
   riskType.value = '';
   riskResult.value = null;
   riskError.value = '';
+  riskShowAllMatches.value = false;
+  riskShowAllReasons.value = false;
 };
 
 const riskLevelLabel = (level: string) => ({
@@ -1599,6 +1620,25 @@ const riskLevelLabel = (level: string) => ({
   medium: '中风险',
   high: '高风险',
 }[level] || level);
+
+const riskVisibleMatches = () => {
+  const matches = riskResult.value?.matches || [];
+  return riskShowAllMatches.value ? matches : matches.slice(0, 6);
+};
+
+const riskHiddenMatchCount = () => Math.max(0, (riskResult.value?.matches?.length || 0) - 6);
+
+const riskVisibleReasons = () => {
+  const reasons = riskResult.value?.topReasons || [];
+  return riskShowAllReasons.value ? reasons : reasons.slice(0, 4);
+};
+
+const riskHiddenReasonCount = () => Math.max(0, (riskResult.value?.topReasons?.length || 0) - 4);
+
+const openRiskMatchTask = (item: any) => {
+  clearTaskFilters();
+  openTaskById(item.id);
+};
 
 const inspectAccountTasks = (accountId: string) => {
   currentTab.value = 'tasks';
@@ -3049,33 +3089,33 @@ onMounted(() => {
       <ApiDocs v-if="currentTab === 'docs'" />
 
       <!-- ========== TAB: PROMPT RISK ========== -->
-      <div v-if="currentTab === 'risk'" class="space-y-6">
-        <div class="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_420px] gap-6">
-          <div class="space-y-6">
-            <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
-              <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-5">
+      <div v-if="currentTab === 'risk'" class="space-y-5">
+        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_400px] gap-5">
+          <div class="space-y-5 min-w-0">
+            <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4 sm:p-5">
+              <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 mb-4">
                 <div>
-                  <p class="text-sm font-black text-slate-800">提交前失败预检</p>
+                  <p class="text-sm font-black text-slate-900">提交前失败预检</p>
                   <p class="text-sm text-slate-500 mt-1">按历史失败任务相似度、失败原因和筛选条件判断风险。</p>
                 </div>
                 <div class="flex flex-wrap gap-2">
-                  <span class="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">不消耗积分</span>
-                  <span v-if="riskResult?.checkedAt" class="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">{{ new Date(riskResult.checkedAt).toLocaleTimeString() }}</span>
+                  <span class="text-xs font-bold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">不消耗积分</span>
+                  <span v-if="riskResult?.checkedAt" class="text-xs font-bold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">{{ new Date(riskResult.checkedAt).toLocaleTimeString() }}</span>
                 </div>
               </div>
               <div class="space-y-4">
                 <div>
                   <label class="block text-sm font-bold text-slate-700 mb-2">待检查提示词</label>
-                  <textarea v-model="riskPrompt" rows="8" placeholder="粘贴即将提交到生图或生视频接口的提示词" class="w-full border border-slate-300 bg-slate-50 focus:bg-white px-4 py-3 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y leading-6"></textarea>
+                  <textarea v-model="riskPrompt" rows="6" placeholder="粘贴即将提交到生图或生视频接口的提示词" class="w-full border border-slate-300 bg-slate-50 focus:bg-white px-4 py-3 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y leading-6"></textarea>
                 </div>
-                <div class="grid grid-cols-1 md:grid-cols-[220px_220px_1fr_auto] gap-4 items-end">
+                <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[220px_220px_minmax(0,1fr)] gap-3 items-end">
                   <div>
                     <label class="block text-sm font-bold text-slate-700 mb-2">模型筛选</label>
-                    <input v-model="riskModel" placeholder="可选，如 5.0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
+                    <input v-model="riskModel" placeholder="可选，如 5.0" class="w-full border border-slate-300 px-4 py-3 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
                   </div>
                   <div>
                     <label class="block text-sm font-bold text-slate-700 mb-2">任务类型</label>
-                    <select v-model="riskType" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    <select v-model="riskType" class="w-full border border-slate-300 px-4 py-3 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                       <option value="">全部类型</option>
                       <option value="text2image">text2image</option>
                       <option value="image2image">image2image</option>
@@ -3087,107 +3127,150 @@ onMounted(() => {
                       <option value="multimodal2video">multimodal2video</option>
                     </select>
                   </div>
-                  <button @click="checkPromptRisk" :disabled="riskLoading" class="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-6 py-3 rounded-xl font-black text-sm shadow-sm transition">{{ riskLoading ? '检查中...' : '开始预检' }}</button>
-                  <button @click="clearPromptRisk" class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 px-5 py-3 rounded-xl font-bold text-sm">清空</button>
+                  <div class="flex flex-col sm:flex-row gap-2 sm:col-span-2 xl:col-span-1">
+                    <button @click="checkPromptRisk" :disabled="riskLoading" class="w-full sm:w-auto bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-black text-sm shadow-sm transition">{{ riskLoading ? '检查中...' : '开始预检' }}</button>
+                    <button @click="clearPromptRisk" class="w-full sm:w-auto bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 px-5 py-3 rounded-lg font-bold text-sm">清空</button>
+                  </div>
                 </div>
-                <div v-if="riskError" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">{{ riskError }}</div>
+                <div v-if="riskError" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-lg text-sm font-medium">{{ riskError }}</div>
               </div>
             </div>
 
-            <div v-if="riskResult" class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-              <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div v-if="riskResult" class="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+              <div class="grid grid-cols-2 lg:grid-cols-4 divide-x-0 lg:divide-x divide-y lg:divide-y-0 divide-slate-100">
+                <div class="p-4">
+                  <p class="text-xs font-bold text-slate-400">风险级别</p>
+                  <p class="mt-2 inline-flex border px-3 py-1.5 rounded-lg text-xs font-black" :class="riskLevelClass(riskResult.level)">{{ riskLevelLabel(riskResult.level) }}</p>
+                </div>
+                <div class="p-4">
+                  <p class="text-xs font-bold text-slate-400">最高相似度</p>
+                  <p class="text-2xl font-black text-slate-900 mt-1">{{ riskScorePercent(riskResult.highestSimilarity || 0) }}</p>
+                </div>
+                <div class="p-4">
+                  <p class="text-xs font-bold text-slate-400">扫描样本</p>
+                  <p class="text-2xl font-black text-slate-900 mt-1">{{ riskResult.reviewedCount || 0 }}</p>
+                </div>
+                <div class="p-4">
+                  <p class="text-xs font-bold text-slate-400">命中记录</p>
+                  <p class="text-2xl font-black text-slate-900 mt-1">{{ riskResult.matchedCount || 0 }}</p>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="riskResult" class="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+              <div class="px-4 sm:px-5 py-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>
                   <h3 class="font-black text-slate-900">相似失败记录</h3>
-                  <p class="text-xs text-slate-400 mt-1">扫描 {{ riskResult.reviewedCount || 0 }} 条历史失败任务，命中 {{ riskResult.matchedCount || 0 }} 条</p>
+                  <p class="text-xs text-slate-400 mt-1">按相似度排序，优先看失败原因和原始任务。</p>
                 </div>
-                <span class="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">{{ riskResult.matches?.length || 0 }} 条</span>
+                <span class="self-start sm:self-auto text-xs font-bold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">{{ riskResult.matches?.length || 0 }} 条</span>
               </div>
-              <div v-if="!riskResult.matches?.length" class="px-6 py-12 text-center">
-                <p class="text-3xl mb-3">✓</p>
-                <p class="text-sm font-semibold text-slate-600">没有命中相似失败记录</p>
+              <div v-if="!riskResult.matches?.length" class="px-5 py-10 text-center">
+                <p class="text-sm font-semibold text-slate-700">没有命中相似失败记录</p>
                 <p class="text-xs text-slate-400 mt-1">这不代表一定成功，只表示历史失败库里暂未发现相似项。</p>
               </div>
               <div v-else class="divide-y divide-slate-100">
-                <div v-for="item in riskResult.matches" :key="item.id" class="p-5 hover:bg-slate-50 transition">
-                  <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-                    <div class="min-w-0">
-                      <p class="text-sm font-semibold text-slate-800 break-words leading-6">{{ shortText(item.prompt, 180) }}</p>
-                      <div class="flex flex-wrap gap-2 mt-2 text-[11px] font-bold">
-                        <span class="text-slate-500 bg-slate-100 px-2 py-1 rounded-full">{{ item.type }}</span>
-                        <span class="text-slate-500 bg-slate-100 px-2 py-1 rounded-full">{{ item.model || '-' }}</span>
-                        <span class="text-slate-400 bg-slate-50 px-2 py-1 rounded-full">{{ new Date(item.updatedAt).toLocaleString() }}</span>
+                <div v-for="item in riskVisibleMatches()" :key="item.id" class="p-4 sm:p-5 hover:bg-slate-50 transition">
+                  <div class="flex flex-col gap-3">
+                    <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                      <div class="min-w-0 flex-1">
+                        <div class="flex flex-wrap items-center gap-2 text-[11px] font-bold">
+                          <span class="border px-2.5 py-1 rounded-lg" :class="riskSimilarityClass(item.similarity)">相似 {{ riskScorePercent(item.similarity) }}</span>
+                          <span class="text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg">{{ item.type }}</span>
+                          <span class="text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg">{{ item.model || '-' }}</span>
+                          <span class="text-slate-400 bg-slate-50 px-2.5 py-1 rounded-lg">{{ new Date(item.updatedAt).toLocaleString() }}</span>
+                        </div>
+                        <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-3">
+                          <div class="h-full rounded-full" :class="riskSimilarityBarClass(item.similarity)" :style="{ width: riskScorePercent(item.similarity) }"></div>
+                        </div>
                       </div>
-                      <p v-if="item.reason" class="text-xs text-red-500 mt-3 break-words leading-5 bg-red-50 border border-red-100 rounded-xl px-3 py-2">{{ shortText(item.reason, 180) }}</p>
+                      <div class="flex flex-wrap gap-2 shrink-0">
+                        <button @click="openRiskMatchTask(item)" class="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3 py-2 rounded-lg">查看任务</button>
+                        <button @click="inspectFailurePrompt(item)" class="text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-2 rounded-lg">带入筛选</button>
+                        <button @click="nativeCopy(item.prompt)" class="text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-2 rounded-lg">复制</button>
+                      </div>
                     </div>
-                    <div class="flex lg:flex-col gap-2 shrink-0">
-                      <button @click="taskFilterStatus = 'FAILED'; taskFilterPrompt = item.prompt; taskFilterError = ''; currentTab = 'tasks'; fetchTasks(1)" class="text-xs font-black text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-xl">{{ riskScorePercent(item.similarity) }}</button>
-                      <button @click="nativeCopy(item.prompt)" class="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl">复制</button>
-                    </div>
+                    <p class="text-sm font-semibold text-slate-800 break-words leading-6">{{ shortText(item.prompt, 220) }}</p>
+                    <p v-if="item.reason" class="text-xs text-red-600 break-words leading-5 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{{ shortText(item.reason, 220) }}</p>
                   </div>
+                </div>
+                <div v-if="riskHiddenMatchCount()" class="px-5 py-4 bg-slate-50 border-t border-slate-100">
+                  <button @click="riskShowAllMatches = !riskShowAllMatches" class="w-full text-xs font-black text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 px-4 py-2.5 rounded-lg">
+                    {{ riskShowAllMatches ? '收起记录' : `展开剩余 ${riskHiddenMatchCount()} 条` }}
+                  </button>
                 </div>
               </div>
             </div>
           </div>
 
-          <div class="space-y-6">
-            <div class="bg-slate-950 text-white rounded-3xl shadow-sm p-6">
-              <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">风险结论</p>
+          <div class="space-y-5 min-w-0">
+            <div class="bg-white rounded-lg shadow-sm border p-5" :class="riskResult ? riskPanelAccentClass(riskResult.level) : 'border-slate-200'">
+              <div class="flex items-center justify-between gap-3">
+                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">风险结论</p>
+                <span v-if="riskResult" class="border px-3 py-1.5 rounded-lg text-xs font-black" :class="riskLevelClass(riskResult.level)">{{ riskActionLabel(riskResult.level) }}</span>
+              </div>
               <template v-if="riskResult">
-                <div class="mt-4 inline-flex px-4 py-2 rounded-xl border text-sm font-black" :class="riskLevelClass(riskResult.level)">{{ riskLevelLabel(riskResult.level) }} · {{ riskActionLabel(riskResult.level) }}</div>
-                <div class="mt-6">
-                  <div class="flex items-end justify-between">
-                    <p class="text-5xl font-black">{{ riskScorePercent(riskResult.highestSimilarity || 0) }}</p>
-                    <p class="text-xs text-slate-400 pb-2">最高相似度</p>
+                <div class="mt-5">
+                  <div class="flex items-end justify-between gap-3">
+                    <p class="text-4xl font-black text-slate-950">{{ riskScorePercent(riskResult.highestSimilarity || 0) }}</p>
+                    <p class="text-xs text-slate-400 pb-1">最高相似度</p>
                   </div>
-                  <div class="h-2 bg-white/10 rounded-full overflow-hidden mt-4">
+                  <div class="h-2 bg-slate-100 rounded-full overflow-hidden mt-4">
                     <div class="h-full rounded-full" :class="riskAccentClass(riskResult.level)" :style="{ width: riskScorePercent(riskResult.highestSimilarity || 0) }"></div>
                   </div>
                 </div>
-                <p class="text-sm text-slate-300 leading-6 mt-6">{{ riskResult.suggestion }}</p>
-                <div v-if="riskResult.recommendations?.length" class="mt-5 space-y-2">
-                  <p v-for="item in riskResult.recommendations" :key="item" class="text-xs text-slate-300 bg-white/5 border border-white/10 rounded-xl px-3 py-2 leading-5">{{ item }}</p>
+                <p class="text-sm text-slate-700 leading-6 mt-5 bg-slate-50 border border-slate-100 rounded-lg px-3 py-3">{{ riskResult.suggestion }}</p>
+                <div v-if="riskResult.recommendations?.length" class="mt-4 space-y-2">
+                  <p v-for="item in riskResult.recommendations" :key="item" class="text-xs text-slate-600 bg-white border border-slate-200 rounded-lg px-3 py-2 leading-5">{{ item }}</p>
                 </div>
-                <div class="mt-5 grid grid-cols-2 gap-3 text-xs">
-                  <div class="bg-white/5 border border-white/10 rounded-xl p-3"><p class="text-slate-400">扫描样本</p><p class="font-black mt-1">{{ riskResult.reviewedCount || 0 }}</p></div>
-                  <div class="bg-white/5 border border-white/10 rounded-xl p-3"><p class="text-slate-400">命中记录</p><p class="font-black mt-1">{{ riskResult.matchedCount || 0 }}</p></div>
+                <div v-if="riskResult.thresholds" class="mt-4 flex flex-wrap gap-2 text-[11px] font-bold text-slate-500">
+                  <span class="bg-slate-100 px-2.5 py-1 rounded-lg">低 {{ riskScorePercent(riskResult.thresholds.low) }}</span>
+                  <span class="bg-slate-100 px-2.5 py-1 rounded-lg">中 {{ riskScorePercent(riskResult.thresholds.medium) }}</span>
+                  <span class="bg-slate-100 px-2.5 py-1 rounded-lg">高 {{ riskScorePercent(riskResult.thresholds.high) }}</span>
                 </div>
               </template>
               <template v-else>
-                <p class="text-4xl font-black mt-5">待检查</p>
-                <p class="text-sm text-slate-400 leading-6 mt-3">粘贴提示词后开始预检，系统会返回与历史失败记录的相似度和可追溯任务。</p>
+                <p class="text-3xl font-black text-slate-900 mt-5">待检查</p>
+                <p class="text-sm text-slate-500 leading-6 mt-3">粘贴提示词后开始预检，系统会返回与历史失败记录的相似度和可追溯任务。</p>
               </template>
             </div>
 
-            <div v-if="riskResult?.topReasons?.length" class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
-              <h3 class="font-black text-slate-900">高频失败原因</h3>
-              <p class="text-xs text-slate-400 mt-1 mb-4">来自本次命中的相似失败记录</p>
-              <div class="space-y-2">
-                <div v-for="item in riskResult.topReasons" :key="item.reason" class="bg-red-50 border border-red-100 rounded-2xl px-4 py-3">
+            <div v-if="riskResult?.topReasons?.length" class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+              <div class="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <h3 class="font-black text-slate-900">高频失败原因</h3>
+                  <p class="text-xs text-slate-400 mt-1">来自本次命中的相似失败记录</p>
+                </div>
+                <button v-if="riskHiddenReasonCount()" @click="riskShowAllReasons = !riskShowAllReasons" class="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg shrink-0">{{ riskShowAllReasons ? '收起' : '更多' }}</button>
+              </div>
+              <div class="divide-y divide-slate-100 border-y border-slate-100">
+                <div v-for="item in riskVisibleReasons()" :key="item.reason" class="py-3">
                   <div class="flex items-start justify-between gap-3">
                     <p class="text-xs text-red-700 leading-5 break-words">{{ item.reason }}</p>
-                    <span class="text-xs font-black text-red-500 shrink-0">{{ item.count }}</span>
+                    <span class="text-xs font-black text-red-500 bg-red-50 border border-red-100 rounded-lg px-2 py-1 shrink-0">{{ item.count }}</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
-              <div class="flex items-center justify-between mb-4">
+            <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+              <div class="flex items-center justify-between gap-3 mb-4">
                 <div>
                   <h3 class="font-black text-slate-900">高频失败提示词</h3>
                   <p class="text-xs text-slate-400 mt-1">用于快速复核和改写</p>
                 </div>
-                <button @click="fetchStats" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">更新</button>
+                <button @click="fetchStats" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg shrink-0">更新</button>
               </div>
-              <div v-if="!stats?.failures?.byPrompt?.length" class="text-sm text-slate-400 py-8 text-center border border-dashed border-slate-200 rounded-2xl">暂无失败提示词数据</div>
+              <div v-if="!stats?.failures?.byPrompt?.length" class="text-sm text-slate-400 py-8 text-center border border-dashed border-slate-200 rounded-lg">暂无失败提示词数据</div>
               <div v-else class="space-y-2">
-                <button v-for="item in stats.failures.byPrompt" :key="`${item.prompt}-${item.model}-${item.type}`" @click="openRiskWithPrompt(item.prompt, item.model, item.type)" class="w-full text-left bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 rounded-2xl px-4 py-3 transition">
+                <button v-for="item in stats.failures.byPrompt.slice(0, 8)" :key="`${item.prompt}-${item.model}-${item.type}`" @click="openRiskWithPrompt(item.prompt, item.model, item.type)" class="w-full text-left bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 rounded-lg px-4 py-3 transition">
                   <div class="flex items-start justify-between gap-3">
-                    <span class="text-xs leading-5">{{ item.promptPreview }}</span>
+                    <span class="text-xs leading-5 break-words">{{ item.promptPreview }}</span>
                     <span class="text-xs font-black shrink-0">{{ item.count }}</span>
                   </div>
                   <p class="text-[11px] text-red-400 mt-1">{{ item.type }} · {{ item.model || '-' }}</p>
                 </button>
+                <p v-if="stats.failures.byPrompt.length > 8" class="text-[11px] text-slate-400 text-center pt-1">已显示前 8 条，共 {{ stats.failures.byPrompt.length }} 条</p>
               </div>
             </div>
           </div>
