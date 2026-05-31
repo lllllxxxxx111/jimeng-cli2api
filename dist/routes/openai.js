@@ -288,7 +288,9 @@ const buildSessionParam = (raw) => {
         return '';
     const session = Number(text);
     if (!Number.isInteger(session) || session < 0) {
-        throw new Error('session must be a non-negative integer');
+        const error = new Error('session must be a non-negative integer');
+        error.statusCode = 400;
+        throw error;
     }
     return `--session=${session}`;
 };

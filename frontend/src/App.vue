@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import ApiDocs from './components/ApiDocs.vue';
+import TaskDetailModal from './components/TaskDetailModal.vue';
 
 const token = ref(localStorage.getItem('admin_token') || '');
 const loginPassword = ref('');
@@ -46,6 +47,9 @@ const taskFilterError = ref('');
 const taskFilterAccountId = ref('');
 const taskLoading = ref(false);
 const taskDetail = ref<any>(null);
+const taskLiveStatus = ref<any>(null);
+const taskLiveLoading = ref(false);
+const taskLiveError = ref('');
 const failReason = ref('');
 const failingId = ref<string | null>(null);
 const retryingId = ref<string | null>(null);
@@ -828,6 +832,16 @@ const pollPathForSdkResponse = (value: any) => {
   return taskId ? `/v1/tasks/${encodeURIComponent(taskId)}` : '';
 };
 
+const sdkTaskPreviewUrl = (value: any) => {
+  const taskId = extractTaskIdFromSdkResponse(value);
+  if (!taskId || !token.value) return '';
+  return `/admin/tasks/${encodeURIComponent(taskId)}/content?token=${encodeURIComponent(token.value)}`;
+};
+
+const sdkMediaDisplayUrl = (source: any, media: SdkMediaPreview) => {
+  return sdkTaskPreviewUrl(source) || media.url;
+};
+
 const callOpenAiApi = async (path: string, options: any = {}) => {
   const key = activeSdkApiKey();
   if (!key) throw new Error('请先选择或粘贴一个完整 API Key');
@@ -1372,19 +1386,39 @@ const inspectFailedTask = (task: any) => {
   fetchTasks(1);
 };
 
-const forceFailTask = async (id: string) => {
-  if (!confirm('确认强制失败该任务？')) return;
+const refreshTaskLiveStatus = async () => {
+  if (!taskDetail.value?.id) return;
+  taskLiveLoading.value = true;
+  taskLiveError.value = '';
+  try {
+    const res = await authFetch(`/admin/tasks/${encodeURIComponent(taskDetail.value.id)}/live`);
+    const data = await res.json();
+    if (res.ok) {
+      taskLiveStatus.value = data;
+    } else {
+      taskLiveError.value = data.error || '查询官方状态失败';
+    }
+  } catch (e: any) {
+    taskLiveError.value = e.message || '查询官方状态失败';
+  } finally {
+    taskLiveLoading.value = false;
+  }
+};
+
+const stopTrackingTask = async (id: string) => {
+  if (!confirm('确认停止本地跟踪该任务？这不会取消即梦侧已经提交的生成。')) return;
   failingId.value = id;
   try {
-    const res = await authFetch(`/admin/tasks/${id}/fail`, {
+    const res = await authFetch(`/admin/tasks/${id}/stop-tracking`, {
       method: 'POST',
-      body: JSON.stringify({ reason: failReason.value || '管理员手动标记失败' })
+      body: JSON.stringify({ reason: failReason.value || '管理员停止本地跟踪；不代表即梦侧已取消生成' })
     });
     const data = await res.json();
     if (res.ok) {
-      successMessage.value = '任务已标记为失败';
+      successMessage.value = '已停止本地跟踪';
       failReason.value = '';
       taskDetail.value = null;
+      taskLiveStatus.value = null;
       await fetchTasks();
     } else {
       errorMessage.value = data.error || '操作失败';
@@ -1415,7 +1449,14 @@ const retryTask = async (id: string) => {
   }
 };
 
-const openTaskDetail = (task: any) => { taskDetail.value = task; };
+const openTaskDetail = (task: any) => {
+  taskDetail.value = task;
+  taskLiveStatus.value = null;
+  taskLiveError.value = '';
+  if (task?.jimengSubmitId) {
+    refreshTaskLiveStatus();
+  }
+};
 
 const fetchNativeSessions = async () => {
   if (!ensureNativeAccount()) return;
@@ -1607,15 +1648,15 @@ onMounted(() => {
     </div>
   </div>
 
-  <div v-else class="flex min-h-screen bg-slate-100 text-slate-800">
-    <aside class="w-72 bg-slate-950 text-white flex flex-col shadow-xl z-10 p-5 shrink-0">
-      <div class="mb-5 border-b border-white/10 pb-5">
+  <div v-else class="flex flex-col lg:flex-row min-h-screen bg-slate-100 text-slate-800">
+    <aside class="w-full lg:w-72 bg-slate-950 text-white flex flex-col shadow-xl z-10 p-4 lg:p-5 shrink-0">
+      <div class="mb-4 lg:mb-5 border-b border-white/10 pb-4 lg:pb-5">
         <p class="text-xs font-bold text-indigo-300 tracking-wider uppercase">Jimeng Hub</p>
-        <h1 class="text-2xl font-black mt-1">即梦调度台</h1>
-        <p class="text-xs text-slate-400 mt-2 leading-5">账号池、任务队列、SDK 接入和运行监控</p>
+        <h1 class="text-xl lg:text-2xl font-black mt-1">即梦调度台</h1>
+        <p class="text-xs text-slate-400 mt-2 leading-5 hidden sm:block">账号池、任务队列、SDK 接入和运行监控</p>
       </div>
-      <nav class="flex-1 space-y-5 overflow-y-auto pr-1">
-        <div v-for="group in navGroups" :key="group.title">
+      <nav class="flex lg:flex-col gap-3 lg:gap-5 overflow-x-auto lg:overflow-y-auto lg:pr-1 pb-1 lg:pb-0">
+        <div v-for="group in navGroups" :key="group.title" class="min-w-[180px] lg:min-w-0">
           <p class="px-3 text-[11px] font-black text-slate-500 tracking-wider mb-2">{{ group.title }}</p>
           <div class="space-y-1">
             <button
@@ -1631,7 +1672,7 @@ onMounted(() => {
           </div>
         </div>
       </nav>
-      <div class="rounded-xl bg-slate-900 border border-white/10 p-4 my-4 space-y-2">
+      <div class="hidden lg:block rounded-xl bg-slate-900 border border-white/10 p-4 my-4 space-y-2">
         <div class="flex items-center justify-between text-xs text-slate-400">
           <span>Base URL</span>
           <span class="font-mono text-indigo-300">:3000/v1</span>
@@ -1641,15 +1682,15 @@ onMounted(() => {
           <span class="font-mono text-emerald-300">online</span>
         </div>
       </div>
-      <button @click="doLogout" class="w-full bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-300 py-3 rounded-xl font-bold transition">退出系统</button>
+      <button @click="doLogout" class="hidden lg:block w-full bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-300 py-3 rounded-xl font-bold transition">退出系统</button>
     </aside>
 
-    <main class="flex-1 p-8 overflow-y-auto h-screen">
+    <main class="flex-1 p-4 lg:p-8 overflow-y-auto min-h-0 lg:h-screen">
 
-      <div class="mb-6 bg-white border border-slate-200 shadow-sm px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-5">
+      <div class="mb-6 bg-white border border-slate-200 shadow-sm px-4 lg:px-6 py-4 lg:py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-5">
         <div class="min-w-0">
           <p class="text-xs font-bold text-indigo-600 tracking-wider uppercase">Console</p>
-          <h2 class="text-3xl font-black text-slate-900 mt-1">{{ pageTitle() }}</h2>
+          <h2 class="text-2xl lg:text-3xl font-black text-slate-900 mt-1">{{ pageTitle() }}</h2>
           <p class="text-sm text-slate-500 mt-1">{{ pageSubtitle() }}</p>
         </div>
         <div class="flex flex-wrap gap-2 text-xs font-semibold">
@@ -2490,6 +2531,7 @@ onMounted(() => {
                 <p class="text-xs text-slate-400 mt-1">默认显示摘要，完整 JSON 可按需展开</p>
               </div>
               <div class="flex gap-2">
+                <a v-if="sdkTaskPreviewUrl(sdkResponse)" :href="sdkTaskPreviewUrl(sdkResponse)" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg">打开预览</a>
                 <button v-if="extractTaskIdFromSdkResponse(sdkResponse)" @click="openSdkTaskInAdmin" class="text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">去任务页</button>
                 <button @click="sdkShowRawResponse = !sdkShowRawResponse" :disabled="!sdkResponse" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-40 px-3 py-1.5 rounded-lg">{{ sdkShowRawResponse ? '收起 JSON' : '展开 JSON' }}</button>
                 <button @click="clearSdkResult" :disabled="!sdkResponse && !sdkPollResponse && !sdkError" class="text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">清空</button>
@@ -2524,12 +2566,13 @@ onMounted(() => {
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
                   <div v-for="media in sdkMediaPreview(sdkResponse)" :key="media.url" class="border border-slate-100 rounded-xl overflow-hidden bg-slate-50">
-                    <img v-if="media.kind === 'image'" :src="media.url" class="w-full max-h-[360px] object-contain bg-slate-950" loading="lazy" />
-                    <video v-else-if="media.kind === 'video'" :src="media.url" controls class="w-full max-h-[360px] bg-slate-950"></video>
+                    <img v-if="media.kind === 'image'" :src="sdkMediaDisplayUrl(sdkResponse, media)" class="w-full max-h-[360px] object-contain bg-slate-950" loading="lazy" />
+                    <video v-else-if="media.kind === 'video'" :src="sdkMediaDisplayUrl(sdkResponse, media)" controls class="w-full max-h-[360px] bg-slate-950"></video>
                     <div v-else class="p-5 text-sm text-slate-600">暂不支持内嵌预览，可打开链接查看。</div>
                     <div class="p-3 border-t border-slate-100 bg-white flex items-center justify-between gap-3">
                       <span class="text-xs font-bold text-slate-500 uppercase">{{ media.kind }}</span>
-                      <a :href="media.url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-indigo-600 hover:text-indigo-800 truncate">打开原始链接</a>
+                      <a :href="sdkMediaDisplayUrl(sdkResponse, media)" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 hover:text-emerald-800 truncate">打开预览</a>
+                      <a v-if="sdkMediaDisplayUrl(sdkResponse, media) !== media.url" :href="media.url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-slate-500 hover:text-slate-700 truncate">原始链接</a>
                     </div>
                   </div>
                 </div>
@@ -2546,6 +2589,7 @@ onMounted(() => {
                 <p class="text-xs text-slate-400 mt-1">{{ pollPathForSdkResponse(sdkResponse) || '提交成功后显示轮询地址' }}</p>
               </div>
               <div class="flex gap-2">
+                <a v-if="sdkTaskPreviewUrl(sdkPollResponse || sdkResponse)" :href="sdkTaskPreviewUrl(sdkPollResponse || sdkResponse)" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg">打开预览</a>
                 <button @click="sdkShowRawPollResponse = !sdkShowRawPollResponse" :disabled="!sdkPollResponse" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-40 px-3 py-1.5 rounded-lg">{{ sdkShowRawPollResponse ? '收起 JSON' : '展开 JSON' }}</button>
                 <button @click="nativeCopy(jsonText(sdkPollResponse))" :disabled="!sdkPollResponse" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 px-3 py-1.5 rounded-lg">复制</button>
               </div>
@@ -2578,12 +2622,13 @@ onMounted(() => {
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
                   <div v-for="media in sdkMediaPreview(sdkPollResponse, sdkResponse)" :key="media.url" class="border border-slate-100 rounded-xl overflow-hidden bg-slate-50">
-                    <img v-if="media.kind === 'image'" :src="media.url" class="w-full max-h-[360px] object-contain bg-slate-950" loading="lazy" />
-                    <video v-else-if="media.kind === 'video'" :src="media.url" controls class="w-full max-h-[360px] bg-slate-950"></video>
+                    <img v-if="media.kind === 'image'" :src="sdkMediaDisplayUrl(sdkPollResponse || sdkResponse, media)" class="w-full max-h-[360px] object-contain bg-slate-950" loading="lazy" />
+                    <video v-else-if="media.kind === 'video'" :src="sdkMediaDisplayUrl(sdkPollResponse || sdkResponse, media)" controls class="w-full max-h-[360px] bg-slate-950"></video>
                     <div v-else class="p-5 text-sm text-slate-600">暂不支持内嵌预览，可打开链接查看。</div>
                     <div class="p-3 border-t border-slate-100 bg-white flex items-center justify-between gap-3">
                       <span class="text-xs font-bold text-slate-500 uppercase">{{ media.kind }}</span>
-                      <a :href="media.url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-indigo-600 hover:text-indigo-800 truncate">打开原始链接</a>
+                      <a :href="sdkMediaDisplayUrl(sdkPollResponse || sdkResponse, media)" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-700 hover:text-emerald-800 truncate">打开预览</a>
+                      <a v-if="sdkMediaDisplayUrl(sdkPollResponse || sdkResponse, media) !== media.url" :href="media.url" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-slate-500 hover:text-slate-700 truncate">原始链接</a>
                     </div>
                   </div>
                 </div>
@@ -2713,20 +2758,20 @@ onMounted(() => {
       <!-- ========== TAB: TASKS ========== -->
       <div v-if="currentTab === 'tasks'" class="space-y-6">
         <div class="flex items-center justify-between flex-wrap gap-4">
-          <div class="flex items-center gap-3 flex-wrap">
-            <select v-model="taskFilterStatus" @change="fetchTasks(1)" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:flex xl:items-center gap-3 w-full">
+            <select v-model="taskFilterStatus" @change="fetchTasks(1)" class="w-full xl:w-auto border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
               <option value="">全部状态</option>
               <option value="PENDING">PENDING</option>
               <option value="PROCESSING">PROCESSING</option>
               <option value="SUCCESS">SUCCESS</option>
               <option value="FAILED">FAILED</option>
             </select>
-            <select v-model="taskFilterAccountId" @change="fetchTasks(1)" class="border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
+            <select v-model="taskFilterAccountId" @change="fetchTasks(1)" class="w-full xl:w-auto border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
               <option value="">全部账号</option>
               <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option>
             </select>
-            <input v-model="taskFilterPrompt" @keyup.enter="fetchTasks(1)" placeholder="搜索提示词" class="w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
-            <input v-model="taskFilterError" @keyup.enter="fetchTasks(1)" placeholder="搜索失败原因" class="w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
+            <input v-model="taskFilterPrompt" @keyup.enter="fetchTasks(1)" placeholder="搜索提示词" class="w-full xl:w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
+            <input v-model="taskFilterError" @keyup.enter="fetchTasks(1)" placeholder="搜索失败原因" class="w-full xl:w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
             <button @click="fetchTasks(1)" :disabled="taskLoading" class="bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">筛选</button>
             <button @click="clearTaskFilters(); fetchTasks(1)" class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 px-5 py-2.5 rounded-lg font-bold text-sm">清空</button>
             <button @click="fetchTasks(taskPage)" :disabled="taskLoading" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">刷新</button>
@@ -2753,8 +2798,47 @@ onMounted(() => {
           <span v-if="taskFilterError" class="bg-red-50 text-red-700 px-3 py-1.5 rounded-full">失败原因：{{ shortText(taskFilterError, 42) }}</span>
         </div>
 
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          <table class="w-full text-sm">
+        <div class="md:hidden space-y-3">
+          <div v-if="taskLoading" class="bg-white rounded-2xl border border-slate-200 py-10 text-center text-sm text-slate-400">加载中...</div>
+          <div v-else-if="tasks.length === 0" class="bg-white rounded-2xl border border-slate-200 py-10 text-center text-sm text-slate-400">暂无任务</div>
+          <template v-else>
+            <div v-for="task in tasks" :key="`mobile-${task.id}`" class="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <span class="text-xs font-bold px-2 py-1 rounded-full" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
+                  <p class="text-xs text-slate-400 mt-2">{{ new Date(task.createdAt).toLocaleString() }}</p>
+                </div>
+                <button @click="openTaskDetail(task)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition shrink-0">详情</button>
+              </div>
+              <div class="grid grid-cols-2 gap-3 text-xs">
+                <div class="bg-slate-50 rounded-xl p-3 min-w-0">
+                  <p class="font-bold text-slate-400">类型</p>
+                  <p class="font-mono text-slate-700 mt-1 break-words">{{ task.type || '-' }}</p>
+                </div>
+                <div class="bg-slate-50 rounded-xl p-3 min-w-0">
+                  <p class="font-bold text-slate-400">账号</p>
+                  <p class="text-slate-700 mt-1 break-words">{{ task.account?.name || '-' }}</p>
+                </div>
+                <div class="col-span-2 bg-slate-50 rounded-xl p-3 min-w-0">
+                  <p class="font-bold text-slate-400">模型</p>
+                  <p class="font-mono text-slate-700 mt-1 break-words">{{ task.model || '-' }}</p>
+                </div>
+              </div>
+              <div>
+                <p class="text-xs font-bold text-slate-400 mb-1">提示词</p>
+                <p class="text-sm text-slate-700 leading-6 break-words">{{ shortText(task.prompt, 160) || '-' }}</p>
+                <p v-if="task.errorMsg || task.pollErrorMsg" class="text-xs text-red-500 mt-2 break-words leading-5">{{ shortText(task.errorMsg || task.pollErrorMsg, 140) }}</p>
+              </div>
+              <div class="flex flex-wrap gap-2 pt-1">
+                <button v-if="task.status !== 'SUCCESS' && task.status !== 'FAILED'" @click="stopTrackingTask(task.id)" :disabled="failingId === task.id" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">停止跟踪</button>
+                <button v-if="task.status === 'FAILED' && task.jimengSubmitId" @click="retryTask(task.id)" :disabled="retryingId === task.id" class="text-xs font-semibold text-amber-600 bg-amber-50 hover:bg-amber-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">重试</button>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div class="hidden md:block bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
+          <table class="w-full min-w-[960px] text-sm">
             <thead class="bg-slate-50 border-b border-slate-200">
               <tr>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">状态</th>
@@ -2784,7 +2868,7 @@ onMounted(() => {
                 <td class="px-4 py-3">
                   <div class="flex items-center gap-2">
                     <button @click="openTaskDetail(task)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition">详情</button>
-                    <button v-if="task.status !== 'SUCCESS' && task.status !== 'FAILED'" @click="forceFailTask(task.id)" :disabled="failingId === task.id" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">强制失败</button>
+                    <button v-if="task.status !== 'SUCCESS' && task.status !== 'FAILED'" @click="stopTrackingTask(task.id)" :disabled="failingId === task.id" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">停止跟踪</button>
                     <button v-if="task.status === 'FAILED' && task.jimengSubmitId" @click="retryTask(task.id)" :disabled="retryingId === task.id" class="text-xs font-semibold text-amber-600 bg-amber-50 hover:bg-amber-100 disabled:opacity-50 px-3 py-1.5 rounded-lg transition">重试</button>
                   </div>
                 </td>
@@ -2802,40 +2886,19 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 任务详情弹窗 -->
-        <div v-if="taskDetail" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="taskDetail = null">
-          <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
-            <div class="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
-              <h3 class="font-black text-slate-800 text-lg">任务详情</h3>
-              <button @click="taskDetail = null" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
-            </div>
-            <div class="px-6 py-5 overflow-y-auto space-y-4 text-sm">
-              <div class="grid grid-cols-2 gap-4">
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">任务 ID</p><code class="text-xs font-mono text-slate-700 break-all select-all">{{ taskDetail.id }}</code></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">状态</p><span class="text-xs font-bold px-2 py-1 rounded-full" :class="statusClass(taskDetail.status)">{{ statusLabel(taskDetail.status) }}</span></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">Submit ID</p><code class="text-xs font-mono text-slate-700 break-all select-all">{{ taskDetail.jimengSubmitId || '-' }}</code></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">Log ID</p><code class="text-xs font-mono text-slate-700 break-all select-all">{{ taskDetail.jimengLogId || '-' }}</code></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">类型</p><span class="font-mono text-xs">{{ taskDetail.type }}</span></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">模型</p><span class="font-mono text-xs">{{ taskDetail.model || '-' }}</span></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">账号</p><span>{{ taskDetail.account?.name || '-' }}</span></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">API Key 归属</p><span>{{ taskDetail.apiKey?.owner || '-' }}</span></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">创建时间</p><span>{{ new Date(taskDetail.createdAt).toLocaleString() }}</span></div>
-                <div><p class="text-xs font-bold text-slate-400 uppercase mb-1">更新时间</p><span>{{ new Date(taskDetail.updatedAt).toLocaleString() }}</span></div>
-              </div>
-              <div v-if="taskDetail.prompt"><p class="text-xs font-bold text-slate-400 uppercase mb-1">Prompt</p><p class="text-sm text-slate-700 bg-slate-50 rounded-lg px-3 py-2 break-words">{{ taskDetail.prompt }}</p></div>
-              <div v-if="taskDetail.resultUrl"><p class="text-xs font-bold text-slate-400 uppercase mb-1">结果 URL</p><a :href="taskDetail.resultUrl" target="_blank" class="text-xs font-mono text-indigo-600 hover:underline break-all">{{ taskDetail.resultUrl }}</a></div>
-              <div v-if="taskDetail.errorMsg"><p class="text-xs font-bold text-red-400 uppercase mb-1">失败原因</p><p class="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 break-words">{{ taskDetail.errorMsg }}</p></div>
-              <div v-if="taskDetail.pollErrorMsg"><p class="text-xs font-bold text-amber-500 uppercase mb-1">轮询异常（不代表任务失败）</p><p class="text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 break-words font-mono">{{ taskDetail.pollErrorMsg }}</p></div>
-              <div v-if="taskDetail.status !== 'SUCCESS' && taskDetail.status !== 'FAILED'" class="pt-2 border-t border-slate-100 space-y-2">
-                <p class="text-xs font-bold text-slate-500">手动干预</p>
-                <div class="flex gap-2 items-center">
-                  <input v-model="failReason" placeholder="失败原因（可选）" class="flex-1 border border-slate-300 px-3 py-2 rounded-lg text-xs outline-none focus:ring-2 focus:ring-red-400" />
-                  <button @click="forceFailTask(taskDetail.id)" :disabled="failingId === taskDetail.id" class="text-xs font-bold text-white bg-red-500 hover:bg-red-600 disabled:opacity-50 px-4 py-2 rounded-lg transition">强制失败</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <TaskDetailModal
+          v-if="taskDetail"
+          :task="taskDetail"
+          :token="token"
+          :live-status="taskLiveStatus"
+          :live-loading="taskLiveLoading"
+          :live-error="taskLiveError"
+          :failing-id="failingId"
+          v-model:fail-reason="failReason"
+          @close="taskDetail = null"
+          @refresh-live="refreshTaskLiveStatus"
+          @stop-tracking="stopTrackingTask"
+        />
       </div>
 
       <!-- ========== TAB: SETTINGS ========== -->

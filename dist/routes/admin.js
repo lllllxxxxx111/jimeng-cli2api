@@ -10,6 +10,7 @@ const path_1 = __importDefault(require("path"));
 const crypto_1 = require("crypto");
 const fs_1 = __importDefault(require("fs"));
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
+const axios_1 = __importDefault(require("axios"));
 const adminAuth_1 = require("../middleware/adminAuth");
 const adminStats_1 = require("../services/adminStats");
 const router = (0, express_1.Router)();
@@ -22,12 +23,14 @@ const ACCOUNT_CHECK_TIMEOUT_MS = 30000;
 const NATIVE_CLI_TIMEOUT_MS = 60000;
 const NATIVE_CLI_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 5;
 const NATIVE_DOWNLOAD_ROOT = path_1.default.resolve(__dirname, '../../data/downloads');
+const TASK_PREVIEW_ROOT = path_1.default.resolve(__dirname, '../../data/previews');
 const ACCOUNTS_ROOT = path_1.default.resolve(__dirname, '../../data/accounts');
 const SAFE_CLI_TOKEN = /^[A-Za-z0-9_.:-]+$/;
 const SAFE_SUBMIT_ID = /^[A-Za-z0-9_-]+$/;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 8;
 const loginAttempts = new Map();
+const adminConfigPath = path_1.default.resolve(__dirname, '../../data/admin.json');
 const shellQuote = (value) => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 const assertInside = (root, target, message) => {
     const resolvedRoot = path_1.default.resolve(root);
@@ -57,6 +60,12 @@ const recordFailedLogin = (key) => {
     attempt.count += 1;
 };
 const clearLoginAttempts = (key) => loginAttempts.delete(key);
+const isValidAdminToken = (token) => {
+    if (!token || !fs_1.default.existsSync(adminConfigPath))
+        return false;
+    const config = JSON.parse(fs_1.default.readFileSync(adminConfigPath, 'utf8'));
+    return token === String(config.token || '');
+};
 const getScalar = (value) => {
     const raw = Array.isArray(value) ? value[0] : value;
     return raw === undefined || raw === null ? '' : String(raw).trim();
@@ -134,6 +143,48 @@ const getSafeDownloadDir = (submitId, rawName) => {
     assertInside(NATIVE_DOWNLOAD_ROOT, target, 'download directory is outside the allowed data/downloads folder');
     fs_1.default.mkdirSync(target, { recursive: true });
     return target;
+};
+const getSafePreviewDir = (taskId) => {
+    const cleanName = taskId.replace(/[^A-Za-z0-9_.-]/g, '_');
+    const target = path_1.default.resolve(TASK_PREVIEW_ROOT, cleanName);
+    assertInside(TASK_PREVIEW_ROOT, target, 'preview directory is outside the allowed data/previews folder');
+    fs_1.default.mkdirSync(target, { recursive: true });
+    return target;
+};
+const findFirstDownloadedMediaPath = (value) => {
+    if (!value || typeof value !== 'object')
+        return '';
+    const stack = [value];
+    while (stack.length) {
+        const item = stack.shift();
+        if (!item || typeof item !== 'object')
+            continue;
+        if (typeof item.path === 'string' && /\.(png|jpe?g|webp|gif|mp4|mov|m4v|webm)$/i.test(item.path)) {
+            return item.path;
+        }
+        for (const child of Object.values(item)) {
+            if (child && typeof child === 'object')
+                stack.push(child);
+        }
+    }
+    return '';
+};
+const streamLocalFile = (filePath, res) => {
+    const absolute = assertInside(TASK_PREVIEW_ROOT, path_1.default.resolve(filePath), 'preview file is outside the allowed data/previews folder');
+    if (!fs_1.default.existsSync(absolute))
+        throw new Error('preview file was not created');
+    const ext = path_1.default.extname(absolute).toLowerCase();
+    const contentType = ext === '.mp4' ? 'video/mp4'
+        : ext === '.mov' ? 'video/quicktime'
+            : ext === '.webm' ? 'video/webm'
+                : ext === '.png' ? 'image/png'
+                    : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+                        : ext === '.webp' ? 'image/webp'
+                            : 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', String(fs_1.default.statSync(absolute).size));
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs_1.default.createReadStream(absolute).pipe(res);
 };
 const getAccountForNativeCli = async (accountId) => {
     const id = getScalar(accountId);
@@ -299,6 +350,62 @@ router.post('/sys/password', adminAuth_1.adminAuth, async (req, res) => {
     res.status(401).json({ error: '旧密码错误' });
 });
 router.get('/sys/check', adminAuth_1.adminAuth, (req, res) => res.json({ ok: true }));
+router.get('/tasks/:id/content', async (req, res) => {
+    try {
+        const token = getScalar(req.query.token);
+        const authHeader = String(req.headers.authorization || '');
+        const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+        if (!isValidAdminToken(token || bearerToken)) {
+            return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
+        }
+        const task = await prisma.task.findUnique({
+            where: { id: req.params.id },
+            include: { account: true },
+        });
+        if (!task)
+            return res.status(404).json({ error: '任务不存在' });
+        if (task.status !== 'SUCCESS' || !task.resultUrl) {
+            return res.status(409).json({ error: '任务尚未成功或没有结果 URL' });
+        }
+        try {
+            const upstream = await axios_1.default.get(task.resultUrl, {
+                responseType: 'stream',
+                timeout: 60000,
+                maxRedirects: 5,
+                headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://jimeng.jianying.com/' },
+                validateStatus: (status) => status >= 200 && status < 400,
+            });
+            const contentType = String(upstream.headers['content-type'] || 'application/octet-stream');
+            const contentLength = upstream.headers['content-length'] ? String(upstream.headers['content-length']) : '';
+            res.setHeader('Content-Type', contentType);
+            if (contentLength)
+                res.setHeader('Content-Length', contentLength);
+            res.setHeader('Cache-Control', 'private, no-store');
+            upstream.data.pipe(res);
+            return;
+        }
+        catch { }
+        if (!task.account?.homeDir || !task.jimengSubmitId) {
+            return res.status(502).json({ error: '远端结果 URL 不可用，且任务缺少账号或 submit_id，无法重新下载' });
+        }
+        const previewDir = getSafePreviewDir(task.id);
+        const command = `dreamina query_result --submit_id=${validateSubmitId(task.jimengSubmitId)} --download_dir=${shellQuote(previewDir)}`;
+        const { stdout } = await (0, cliRunner_1.runJimengCommand)(command, task.account.homeDir, false, NATIVE_CLI_DOWNLOAD_TIMEOUT_MS);
+        const parsed = parseCliJson(stdout);
+        const localPath = findFirstDownloadedMediaPath(parsed);
+        if (!localPath) {
+            return res.status(502).json({ error: '已重新查询即梦结果，但没有拿到可下载的媒体文件路径' });
+        }
+        streamLocalFile(localPath, res);
+    }
+    catch (error) {
+        const status = error.response?.status || 502;
+        res.status(status).json({
+            error: '结果文件代理失败，远端签名链接可能已过期或当前网络无法访问',
+            detail: String(error.message || error).slice(0, 300),
+        });
+    }
+});
 // Apply middleware to subsequent routes
 router.use(adminAuth_1.adminAuth);
 router.get('/stats', async (_req, res) => {
@@ -865,7 +972,35 @@ router.get('/tasks', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-// 获取单个任务详情
+// 查询即梦侧实时状态。CLI 不提供取消接口，这里只读官方状态和队列信息。
+router.get('/tasks/:id/live', async (req, res) => {
+    try {
+        const task = await prisma.task.findUnique({
+            where: { id: req.params.id },
+            include: { account: true },
+        });
+        if (!task)
+            return res.status(404).json({ error: '任务不存在' });
+        if (!task.account?.homeDir || !task.jimengSubmitId) {
+            return res.status(400).json({ error: '任务缺少账号或 submit_id，无法查询即梦官方状态' });
+        }
+        const { stdout, stderr } = await (0, cliRunner_1.runJimengCommand)(`dreamina query_result --submit_id=${validateSubmitId(task.jimengSubmitId)}`, task.account.homeDir, false, NATIVE_CLI_TIMEOUT_MS);
+        const parsed = parseCliJson(stdout);
+        res.json({
+            success: true,
+            stdout,
+            stderr,
+            parsed,
+            gen_status: parsed?.gen_status || null,
+            queue_info: parsed?.queue_info || null,
+            credit_count: parsed?.credit_count ?? null,
+            elapsedAt: new Date().toISOString(),
+        });
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 router.get('/tasks/:id', async (req, res) => {
     try {
         const task = await prisma.task.findUnique({
@@ -883,7 +1018,30 @@ router.get('/tasks/:id', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-// 强制失败任务（管理员手动干预卡住的任务）
+// 停止本地跟踪：只更新本地任务状态，不取消即梦侧已提交任务。
+router.post('/tasks/:id/stop-tracking', async (req, res) => {
+    try {
+        const { reason } = req.body;
+        const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+        if (!task)
+            return res.status(404).json({ error: '任务不存在' });
+        if (task.status === 'SUCCESS')
+            return res.status(400).json({ error: '任务已成功，不能停止本地跟踪' });
+        const updated = await prisma.task.update({
+            where: { id: req.params.id },
+            data: {
+                status: 'FAILED',
+                errorMsg: reason || '管理员停止本地跟踪；不代表即梦侧已取消生成',
+                pollErrorMsg: null
+            }
+        });
+        res.json(updated);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// Legacy endpoint kept for old frontend builds. Prefer /stop-tracking.
 router.post('/tasks/:id/fail', async (req, res) => {
     try {
         const { reason } = req.body;
