@@ -105,8 +105,9 @@ const sdkPolling = ref(false);
 const sdkError = ref('');
 const sdkShowRawResponse = ref(false);
 const sdkShowRawPollResponse = ref(false);
-const sdkShowSnippet = ref(false);
 const sdkShowRequestPreview = ref(false);
+const sdkShowAdvancedParams = ref(false);
+const sdkShowLegacyModes = ref(false);
 
 const currentTab = ref('monitor');
 
@@ -689,19 +690,21 @@ const useSelectedSdkKey = () => {
 };
 
 const sdkModeOptions = [
-  { value: 'models', label: '模型列表', endpoint: 'GET /v1/models', cost: '不消耗额度', hint: '先用它验证 Key 和服务可用性。' },
-  { value: 'responses-image', label: 'Responses 文生图', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: 'OpenAI SDK 推荐入口，返回 resp_*。' },
-  { value: 'responses-video', label: 'Responses 生视频', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: '用 metadata 指定视频模式和清晰度。' },
-  { value: 'videos-create', label: 'Videos SDK', endpoint: 'POST /v1/videos', cost: '会创建真实任务', hint: '兼容 OpenAI videos.create / retrieve。' },
-  { value: 'legacy-image', label: '老接口生图', endpoint: 'POST /v1/images/generations', cost: '会创建真实任务', hint: '保留给旧客户端或表单请求。' },
-  { value: 'legacy-video', label: '老接口生视频', endpoint: 'POST /v1/videos/generations', cost: '会创建真实任务', hint: '旧版视频表单入口。' },
+  { value: 'models', label: '模型列表', endpoint: 'GET /v1/models', cost: '不消耗额度', hint: '先用它验证 Key 和服务可用性。', legacy: false },
+  { value: 'responses-image', label: 'Responses 文生图', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: 'OpenAI SDK 推荐入口，返回 resp_*。', legacy: false },
+  { value: 'responses-video', label: 'Responses 生视频', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: '用 metadata 指定视频模式和清晰度。', legacy: false },
+  { value: 'videos-create', label: 'Videos SDK', endpoint: 'POST /v1/videos', cost: '会创建真实任务', hint: '兼容 OpenAI videos.create / retrieve。', legacy: false },
+  { value: 'legacy-image', label: '老接口生图', endpoint: 'POST /v1/images/generations', cost: '会创建真实任务', hint: '保留给旧客户端或表单请求。', legacy: true },
+  { value: 'legacy-video', label: '老接口生视频', endpoint: 'POST /v1/videos/generations', cost: '会创建真实任务', hint: '旧版视频表单入口。', legacy: true },
 ];
+
+const primarySdkModeOptions = () => sdkModeOptions.filter(item => !item.legacy);
+
+const legacySdkModeOptions = () => sdkModeOptions.filter(item => item.legacy);
 
 const sdkModeConfig = () => sdkModeOptions.find(item => item.value === sdkMode.value) || sdkModeOptions[0];
 
 const sdkModeLabel = () => sdkModeConfig().label;
-
-const sdkCostLabel = () => sdkModeConfig().cost;
 
 const sdkNextActionLabel = () => {
   if (!activeSdkApiKey()) return '先配置完整 API Key';
@@ -751,6 +754,53 @@ const sdkVideoModeOptions = [
   { value: 'multiframe2video', label: '多关键帧视频' },
 ];
 
+const sdkImageModelVersion = () => String(sdkImageModel.value || '').replace(/^jimeng-image-/, '');
+
+const sdkVideoModelVersion = () => String(sdkVideoModel.value || '').replace(/^jimeng-video-/, '');
+
+const sdkImageResolutionOptions = () => {
+  const version = sdkImageModelVersion();
+  const values = version === '3.0' || version === '3.1' ? ['1k', '2k'] : ['2k', '4k'];
+  return values.map(value => ({ value, label: value }));
+};
+
+const sdkResolvedVideoMode = () => sdkVideoMode.value === 'auto' ? 'text2video' : sdkVideoMode.value;
+
+const sdkVideoResolutionOptions = () => {
+  const mode = sdkResolvedVideoMode();
+  if (mode === 'multiframe2video') return [{ value: '', label: '不支持' }];
+  const values = sdkVideoModelVersion() === 'seedance2.0_vip' ? ['720p', '1080p'] : ['720p'];
+  return [{ value: '', label: '默认' }, ...values.map(value => ({ value, label: value }))];
+};
+
+const sdkVideoDurationRange = () => {
+  const mode = sdkResolvedVideoMode();
+  const model = sdkVideoModelVersion();
+  if (mode === 'text2video' || mode === 'multimodal2video') return { min: 4, max: 15 };
+  if (model === '3.5pro') return { min: 4, max: 12 };
+  if (['3.0', '3.0fast', '3.0pro'].includes(model)) return { min: 3, max: 10 };
+  return { min: 4, max: 15 };
+};
+
+const syncSdkImageResolution = () => {
+  const allowed = sdkImageResolutionOptions().map(item => item.value);
+  if (!allowed.includes(sdkResolution.value)) sdkResolution.value = allowed[0] || '2k';
+};
+
+const syncSdkVideoOptions = () => {
+  const allowedResolutions = sdkVideoResolutionOptions().map(item => item.value);
+  if (!allowedResolutions.includes(sdkVideoResolution.value)) sdkVideoResolution.value = allowedResolutions[0] || '';
+  const range = sdkVideoDurationRange();
+  const seconds = Number(sdkVideoSeconds.value) || range.min;
+  sdkVideoSeconds.value = Math.min(range.max, Math.max(range.min, seconds));
+};
+
+const selectSdkMode = (mode: string) => {
+  sdkMode.value = mode;
+  syncSdkImageResolution();
+  syncSdkVideoOptions();
+};
+
 const preferredSdkModels = (models: any[]) => models.filter((item: any) => String(item.id || '').startsWith('jimeng-'));
 
 const legacySdkModels = (models: any[]) => models.filter((item: any) => !String(item.id || '').startsWith('jimeng-'));
@@ -762,8 +812,6 @@ const sdkEndpoint = () => {
   if (sdkMode.value === 'legacy-image') return { method: 'POST', path: '/v1/images/generations', contentType: 'form' };
   return { method: 'POST', path: '/v1/videos/generations', contentType: 'form' };
 };
-
-const sdkBaseUrl = () => `${window.location.origin}/v1`;
 
 const buildSdkPayload = () => {
   if (sdkMode.value === 'models') return null;
@@ -903,10 +951,11 @@ const sdkResponseSummary = (value: any) => {
   if (!value) return null;
   const errorMessage = value.error?.message || (typeof value.error === 'string' ? value.error : '');
   if (errorMessage) {
+    const friendlyMessage = friendlySdkError(errorMessage);
     return {
       title: '请求失败',
-      subtitle: errorMessage,
-      stats: [{ label: '错误', value: compactSdkValue(errorMessage) }],
+      subtitle: friendlyMessage,
+      stats: [{ label: '错误', value: compactSdkValue(friendlyMessage) }],
       groups: [] as SdkSummaryGroup[],
     };
   }
@@ -999,64 +1048,6 @@ const sdkRequestPreview = () => {
   }
 };
 
-const sdkSnippet = () => {
-  try {
-    const clientInit = `import OpenAI from "openai";
-
-const client = new OpenAI({
-  apiKey: "sk-jm-...",
-  baseURL: "${sdkBaseUrl()}",
-});`;
-
-    if (sdkMode.value === 'models') {
-      return `${clientInit}
-
-const models = await client.models.list();`;
-    }
-    if (sdkMode.value === 'responses-image') {
-      return `${clientInit}
-
-const resp = await client.responses.create(${JSON.stringify(buildSdkPayload(), null, 2)});
-
-const latest = await client.responses.retrieve(resp.id);`;
-    }
-    if (sdkMode.value === 'responses-video') {
-      return `${clientInit}
-
-const resp = await client.responses.create(${JSON.stringify(buildSdkPayload(), null, 2)});
-
-const latest = await client.responses.retrieve(resp.id);`;
-    }
-    if (sdkMode.value === 'videos-create') {
-      return `${clientInit}
-
-const video = await client.videos.create(${JSON.stringify(buildSdkPayload(), null, 2)});
-
-const latest = await client.videos.retrieve(video.id);`;
-    }
-    const endpoint = sdkEndpoint();
-    const payload = buildSdkPayload() || {};
-    const fields = Object.entries(payload)
-      .flatMap(([key, value]) => {
-        const values = Array.isArray(value) ? value : [value];
-        return values
-          .filter(item => item !== undefined && item !== null && item !== '')
-          .map(item => `form.append(${JSON.stringify(key)}, ${JSON.stringify(typeof item === 'object' ? JSON.stringify(item) : String(item))});`);
-      })
-      .join('\n');
-    return `const form = new FormData();
-${fields}
-
-const resp = await fetch("${window.location.origin}${endpoint.path}", {
-  method: "POST",
-  headers: { Authorization: "Bearer sk-jm-..." },
-  body: form,
-});`;
-  } catch (error: any) {
-    return `// ${error.message}`;
-  }
-};
-
 const extractTaskIdFromSdkResponse = (value: any) => {
   if (!value) return '';
   const rawId = String(value.id || '');
@@ -1084,6 +1075,21 @@ const sdkMediaDisplayUrl = (source: any, media: SdkMediaPreview) => {
   return sdkTaskPreviewUrl(source) || media.url;
 };
 
+const friendlySdkError = (message: string) => {
+  const text = String(message || '').trim();
+  let match = text.match(/resolution_type for model (jimeng-image-[\w.-]+) must be one of ([\w, ]+)/);
+  if (match) return `${match[1]} 不支持当前图片清晰度，请改成 ${match[2]}。`;
+  match = text.match(/video_resolution for model (jimeng-video-[\w._-]+) must be one of ([\w, ]+)/);
+  if (match) return `${match[1]} 不支持当前视频清晰度，请改成 ${match[2]}。`;
+  match = text.match(/ratio must be one of ([\w:, /-]+)/);
+  if (match) return `当前比例不支持，请改成 ${match[1]}。`;
+  match = text.match(/mode must be one of ([\w, ]+)/);
+  if (match) return `当前视频功能模式不支持，请改成 ${match[1]}。`;
+  if (text.includes('CLI session 必须')) return 'CLI session 只能填大于等于 0 的整数，或者留空走默认会话。';
+  if (text.includes('metadata 不是合法 JSON')) return text.replace('扩展 metadata', '高级参数里的 metadata');
+  return text || '接口测试失败';
+};
+
 const callOpenAiApi = async (path: string, options: any = {}) => {
   const key = activeSdkApiKey();
   if (!key) throw new Error('请先选择或粘贴一个完整 API Key');
@@ -1101,9 +1107,10 @@ const callOpenAiApi = async (path: string, options: any = {}) => {
   let data: any = text;
   try { data = text ? JSON.parse(text) : null; } catch {}
   if (!res.ok) {
-    const message = data?.error?.message || data?.error || text || `HTTP ${res.status}`;
-    const error = new Error(message);
+    const rawMessage = data?.error?.message || data?.error || text || `HTTP ${res.status}`;
+    const error = new Error(friendlySdkError(rawMessage));
     (error as any).response = data;
+    (error as any).rawMessage = rawMessage;
     throw error;
   }
   return data;
@@ -1117,6 +1124,8 @@ const runSdkTest = async () => {
   sdkShowRawResponse.value = false;
   sdkShowRawPollResponse.value = false;
   try {
+    syncSdkImageResolution();
+    syncSdkVideoOptions();
     const endpoint = sdkEndpoint();
     let data: any;
     if (endpoint.method === 'GET') {
@@ -2774,9 +2783,9 @@ onMounted(() => {
                   <label class="block text-sm font-bold text-slate-700 mb-2">测试模式</label>
                   <div class="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-2">
                     <button
-                      v-for="mode in sdkModeOptions"
+                      v-for="mode in primarySdkModeOptions()"
                       :key="mode.value"
-                      @click="sdkMode = mode.value"
+                      @click="selectSdkMode(mode.value)"
                       class="text-left border px-4 py-3 rounded-xl transition min-h-[92px]"
                       :class="sdkMode === mode.value ? 'border-indigo-500 bg-indigo-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'"
                     >
@@ -2787,6 +2796,24 @@ onMounted(() => {
                       <p class="font-mono text-[11px] text-slate-400 mt-2 break-all">{{ mode.endpoint }}</p>
                       <p class="text-xs text-slate-500 mt-2 leading-5">{{ mode.hint }}</p>
                     </button>
+                  </div>
+                  <div class="mt-3">
+                    <button @click="sdkShowLegacyModes = !sdkShowLegacyModes" class="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">{{ sdkShowLegacyModes ? '收起兼容旧接口' : '兼容旧接口' }}</button>
+                    <div v-if="sdkShowLegacyModes" class="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+                      <button
+                        v-for="mode in legacySdkModeOptions()"
+                        :key="mode.value"
+                        @click="selectSdkMode(mode.value)"
+                        class="text-left border px-4 py-3 rounded-xl transition"
+                        :class="sdkMode === mode.value ? 'border-indigo-500 bg-indigo-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'"
+                      >
+                        <div class="flex items-start justify-between gap-3">
+                          <p class="text-sm font-black text-slate-900">{{ mode.label }}</p>
+                          <span class="text-[11px] font-black px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">{{ mode.cost }}</span>
+                        </div>
+                        <p class="font-mono text-[11px] text-slate-400 mt-2 break-all">{{ mode.endpoint }}</p>
+                      </button>
+                    </div>
                   </div>
                 </div>
                 <div>
@@ -2813,23 +2840,16 @@ onMounted(() => {
                 </div>
                 <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">图片模型</label>
-                  <select v-model="sdkImageModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                  <select v-model="sdkImageModel" @change="syncSdkImageResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                     <option v-for="model in sdkModelOptions.image" :key="model.value" :value="model.value">{{ model.label }}</option>
                   </select>
                 </div>
                 <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">视频模型</label>
-                  <select v-model="sdkVideoModel" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                  <select v-model="sdkVideoModel" @change="syncSdkVideoOptions" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                     <option v-for="model in sdkModelOptions.video" :key="model.value" :value="model.value">{{ model.label }}</option>
                   </select>
                   <p class="text-xs text-slate-400 mt-2">同一个视频模型支持多个功能，具体功能由模式决定。</p>
-                </div>
-                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
-                  <label class="block text-sm font-bold text-slate-700 mb-2">功能模式</label>
-                  <select v-model="sdkVideoMode" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option v-for="mode in sdkVideoModeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
-                  </select>
-                  <p class="text-xs text-slate-400 mt-2">首尾帧、多模态、多关键帧用这里指定；自动判断适合普通文字或单图视频。</p>
                 </div>
                 <div>
                   <label class="block text-sm font-bold text-slate-700 mb-2">比例</label>
@@ -2845,9 +2865,9 @@ onMounted(() => {
                 <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">图片清晰度</label>
                   <select v-model="sdkResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option value="2k">2k</option>
-                    <option value="4k">4k</option>
+                    <option v-for="item in sdkImageResolutionOptions()" :key="item.value" :value="item.value">{{ item.label }}</option>
                   </select>
+                  <p class="text-xs text-slate-400 mt-2">{{ sdkImageModelVersion() === '3.0' || sdkImageModelVersion() === '3.1' ? '3.x 图片模型最高支持 2k。' : '当前模型支持 2k / 4k。' }}</p>
                 </div>
                 <div v-if="sdkMode === 'videos-create'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">SDK size</label>
@@ -2858,23 +2878,34 @@ onMounted(() => {
                 </div>
                 <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
                   <label class="block text-sm font-bold text-slate-700 mb-2">视频秒数</label>
-                  <input v-model.number="sdkVideoSeconds" type="number" min="3" max="15" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
-                </div>
-                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
-                  <label class="block text-sm font-bold text-slate-700 mb-2">视频清晰度</label>
-                  <select v-model="sdkVideoResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                    <option value="">默认</option>
-                    <option value="720p">720p</option>
-                    <option value="1080p">1080p</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="block text-sm font-bold text-slate-700 mb-2">CLI session</label>
-                  <input v-model.trim="sdkSession" type="number" min="0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" placeholder="可选，不填走默认会话" />
+                  <input v-model.number="sdkVideoSeconds" @change="syncSdkVideoOptions" type="number" :min="sdkVideoDurationRange().min" :max="sdkVideoDurationRange().max" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
+                  <p class="text-xs text-slate-400 mt-2">当前可用范围：{{ sdkVideoDurationRange().min }}-{{ sdkVideoDurationRange().max }} 秒</p>
                 </div>
                 <div class="xl:col-span-2">
-                  <label class="block text-sm font-bold text-slate-700 mb-2">额外 metadata JSON</label>
-                  <textarea v-model="sdkMetadataJson" rows="4" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white font-mono resize-y" placeholder='例如 {"operation":"image_upscale"}'></textarea>
+                  <button @click="sdkShowAdvancedParams = !sdkShowAdvancedParams" class="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">{{ sdkShowAdvancedParams ? '收起高级参数' : '高级参数' }}</button>
+                  <div v-if="sdkShowAdvancedParams" class="grid grid-cols-1 xl:grid-cols-2 gap-4 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                      <label class="block text-sm font-bold text-slate-700 mb-2">功能模式</label>
+                      <select v-model="sdkVideoMode" @change="syncSdkVideoOptions" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                        <option v-for="mode in sdkVideoModeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
+                      </select>
+                      <p class="text-xs text-slate-400 mt-2">默认自动判断；多图、多关键帧或首尾帧时再调整。</p>
+                    </div>
+                    <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                      <label class="block text-sm font-bold text-slate-700 mb-2">视频清晰度</label>
+                      <select v-model="sdkVideoResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                        <option v-for="item in sdkVideoResolutionOptions()" :key="item.value" :value="item.value">{{ item.label }}</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-sm font-bold text-slate-700 mb-2">CLI session</label>
+                      <input v-model.trim="sdkSession" type="number" min="0" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" placeholder="可选，不填走默认会话" />
+                    </div>
+                    <div class="xl:col-span-2">
+                      <label class="block text-sm font-bold text-slate-700 mb-2">额外 metadata JSON</label>
+                      <textarea v-model="sdkMetadataJson" rows="4" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white font-mono resize-y" placeholder='例如 {"operation":"image_upscale"}'></textarea>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2888,21 +2919,13 @@ onMounted(() => {
                 <p class="text-xs text-slate-400 mt-2 font-mono">{{ sdkEndpoint().method }} {{ sdkEndpoint().path }}</p>
                 <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
                   <div class="bg-white/10 p-3 rounded-lg">
-                    <p class="text-slate-400">账号</p>
-                    <p class="font-black mt-1">{{ availableAccountCount() }}</p>
-                  </div>
-                  <div class="bg-white/10 p-3 rounded-lg">
                     <p class="text-slate-400">Key</p>
                     <p class="font-black mt-1">{{ activeSdkApiKey() ? '已配置' : '未配置' }}</p>
                   </div>
-                </div>
-                <div class="mt-2 bg-white/10 p-3 rounded-lg text-xs">
-                  <p class="text-slate-400">下一步</p>
-                  <p class="font-black mt-1">{{ sdkNextActionLabel() }}</p>
-                </div>
-                <div class="mt-2 bg-white/10 p-3 rounded-lg text-xs">
-                  <p class="text-slate-400">消耗</p>
-                  <p class="font-black mt-1">{{ sdkCostLabel() }}</p>
+                  <div class="bg-white/10 p-3 rounded-lg">
+                    <p class="text-slate-400">下一步</p>
+                    <p class="font-black mt-1">{{ sdkNextActionLabel() }}</p>
+                  </div>
                 </div>
                 <div v-if="extractTaskIdFromSdkResponse(sdkResponse)" class="mt-2 bg-white/10 p-3 rounded-lg text-xs min-w-0">
                   <p class="text-slate-400">任务 ID</p>
@@ -2912,59 +2935,13 @@ onMounted(() => {
                   <p class="text-slate-400">轮询地址</p>
                   <p class="font-mono font-black mt-1 break-all">{{ pollPathForSdkResponse(sdkResponse) }}</p>
                 </div>
-              </div>
-              <div class="bg-amber-50 border border-amber-100 p-4 text-sm text-amber-800 leading-6">
-                <p class="font-black mb-1">测试顺序</p>
-                <p>先测模型列表，再切到生成模式提交；返回任务 ID 后直接轮询，成功后用预览代理打开结果。</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-1 2xl:grid-cols-2 gap-6">
-          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
-            <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 class="font-black text-slate-900">OpenAI SDK 示例</h3>
-                <p class="text-xs text-slate-400 mt-1">默认折叠，避免占掉结果区域。</p>
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <button @click="sdkShowSnippet = !sdkShowSnippet" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded-lg">{{ sdkShowSnippet ? '收起示例' : '展开示例' }}</button>
-                <button @click="nativeCopy(sdkSnippet())" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
+                <div class="mt-4 flex flex-wrap gap-2">
+                  <button @click="sdkShowRequestPreview = !sdkShowRequestPreview" class="text-xs font-bold text-slate-900 bg-white/90 hover:bg-white px-3 py-1.5 rounded-lg">{{ sdkShowRequestPreview ? '收起请求' : '展开请求 JSON' }}</button>
+                  <button @click="nativeCopy(jsonText(sdkRequestPreview()))" class="text-xs font-bold text-white bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-lg">复制请求</button>
+                </div>
+                <pre v-if="sdkShowRequestPreview" class="mt-3 bg-black/40 text-slate-200 rounded-xl p-4 text-xs font-mono max-h-[260px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkRequestPreview()) }}</pre>
               </div>
             </div>
-            <div v-if="!sdkShowSnippet" class="p-5 text-sm text-slate-500 min-h-[112px] flex items-center">
-              当前 baseURL：<span class="font-mono text-slate-800 ml-1 break-all">{{ sdkBaseUrl() }}</span>
-            </div>
-            <pre v-else class="bg-slate-950 text-slate-200 p-5 text-xs font-mono max-h-[360px] overflow-auto whitespace-pre-wrap">{{ sdkSnippet() }}</pre>
-          </div>
-
-          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
-            <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 class="font-black text-slate-900">请求预览</h3>
-                <p class="text-xs text-slate-400 mt-1">{{ sdkEndpoint().method }} {{ sdkEndpoint().path }}</p>
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <button @click="sdkShowRequestPreview = !sdkShowRequestPreview" class="text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded-lg">{{ sdkShowRequestPreview ? '收起请求' : '展开请求' }}</button>
-                <button @click="nativeCopy(jsonText(sdkRequestPreview()))" class="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">复制</button>
-              </div>
-            </div>
-            <div v-if="!sdkShowRequestPreview" class="p-5 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
-              <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
-                <p class="text-xs font-bold text-slate-500">方法</p>
-                <p class="font-black text-slate-900 mt-1">{{ sdkEndpoint().method }}</p>
-              </div>
-              <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
-                <p class="text-xs font-bold text-slate-500">Body</p>
-                <p class="font-black text-slate-900 mt-1">{{ sdkMode === 'models' ? '无' : sdkEndpoint().contentType }}</p>
-              </div>
-              <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
-                <p class="text-xs font-bold text-slate-500">Key</p>
-                <p class="font-black text-slate-900 mt-1">{{ activeSdkApiKey() ? '已配置' : '未配置' }}</p>
-              </div>
-            </div>
-            <pre v-else class="bg-slate-950 text-slate-200 p-5 text-xs font-mono max-h-[360px] overflow-auto whitespace-pre-wrap">{{ jsonText(sdkRequestPreview()) }}</pre>
           </div>
         </div>
 
