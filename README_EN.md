@@ -4,6 +4,8 @@
 
 This project aims to transform the underlying CLI commands of Bytedance's Jimeng (Dreamina) into an API interface compliant with the OpenAI standard. This allows for seamless integration into any existing workflow (including support for seedance2.0 and VIP capabilities).
 
+> Reference note: This repository references the implementation ideas from [xiaozhichao2025/JimengCli_api](https://github.com/xiaozhichao2025/JimengCli_api), with local adaptations for SDK compatibility, dashboard UX, failure precheck, and deployment workflows.
+
 ## ⚠️ Disclaimer & Copyright (Must Read)
 
 1. **License**: The core wrapper code of this project (including routes and the dashboard) is open-sourced under the **MIT License**.
@@ -57,7 +59,7 @@ If deploying on Ubuntu/CentOS:
 1. This repository was created **solely to solve the pain point of integrating Jimeng API into personal workflows, intended for personal learning, research, and workflow automation.**
 2. **Do not use illegally**. Any serious consequences or financial losses caused by illegal abuse, commercial profiteering, or violation of official Jimeng terms of service are **entirely unrelated to the author of this repository**. If you do not agree, delete this code immediately.
 
-## �️ Admin Dashboard Guide
+## Admin Dashboard Guide
 
 After starting the service, log in to the admin dashboard to bind your Jimeng VIP account and issue API tokens.
 
