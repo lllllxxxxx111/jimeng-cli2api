@@ -59,8 +59,15 @@ type DispatchResult = {
   submit_id: string;
   task_type: string;
   model: string | null;
+  entrypoint?: string;
+  tool_type?: string;
   command?: string;
   dry_run?: boolean;
+};
+
+type TaskSource = {
+  entrypoint?: string;
+  toolType?: string;
 };
 
 type ModelAliasKind = 'image' | 'video' | 'video_frames' | 'video_multimodal' | 'video_keyframes' | 'upscale';
@@ -1229,6 +1236,8 @@ const buildResponseObject = (task: any) => {
       task_id: task.id,
       submit_id: task.jimengSubmitId,
       task_type: task.type,
+      entrypoint: task.entrypoint,
+      tool_type: task.toolType,
       log_id: task.jimengLogId,
       result_url: resultUrl,
       poll_url: responsePollUrl(task.id),
@@ -1261,6 +1270,8 @@ const buildResponseObjectFromDispatch = (result: DispatchResult) => {
       task_id: result.id,
       submit_id: result.submit_id,
       task_type: result.task_type,
+      entrypoint: result.entrypoint,
+      tool_type: result.tool_type,
       poll_url: responsePollUrl(result.id),
       queue: {
         status: result.dry_run ? 'completed' : 'submitted',
@@ -1296,6 +1307,8 @@ const buildOpenAIVideoObject = (task: any) => {
       task_id: task.id,
       submit_id: task.jimengSubmitId,
       task_type: task.type,
+      entrypoint: task.entrypoint,
+      tool_type: task.toolType,
       log_id: task.jimengLogId,
       result_url: resultUrl,
       dreamina_model: task.model,
@@ -1330,6 +1343,8 @@ const buildOpenAIVideoObjectFromDispatch = (result: DispatchResult) => {
       task_id: result.id,
       submit_id: result.submit_id,
       task_type: result.task_type,
+      entrypoint: result.entrypoint,
+      tool_type: result.tool_type,
       dreamina_model: result.model,
       poll_url: videoPollUrl(result.id),
       queue: {
@@ -1395,12 +1410,21 @@ const createResponsesDispatch = async (req: Request): Promise<DispatchResult> =>
   const metadata = getResponsesMetadata(body);
   const prompt = getFirstBodyValue(metadata.prompt ?? body.prompt) || extractResponsesPrompt(body);
   const toolTypes = getToolTypes(body);
+  const supportedToolTypes = new Set(['image_generation', 'dreamina_video_generation', 'video_generation', 'image_upscale']);
+  const unsupportedToolTypes = toolTypes.filter((type) => !supportedToolTypes.has(type));
+  if (unsupportedToolTypes.length) {
+    throw httpError(400, `Unsupported Responses tool: ${unsupportedToolTypes.join(', ')}`);
+  }
   const operation = String(metadata.operation || metadata.mode || body.operation || '').trim();
   const normalizedOperation = operation.toLowerCase();
   const { filesMap, cleanupFiles } = await collectResponsesFiles(req, body);
   const imageFiles = filesMap.image || [];
   const videoFiles = filesMap.video || [];
   const audioFiles = filesMap.audio || [];
+  const responseSource = (toolType: string): TaskSource => ({
+    entrypoint: 'responses',
+    toolType: toolType === 'video_generation' ? 'dreamina_video_generation' : toolType,
+  });
 
   const commonBody: Record<string, any> = {
     ...metadata,
@@ -1418,11 +1442,12 @@ const createResponsesDispatch = async (req: Request): Promise<DispatchResult> =>
 
   try {
     if (normalizedOperation === 'image_upscale' || normalizedOperation === 'upscale') {
-      return await dispatchUpscaleTask(req, commonBody, imageFiles[0]);
+      return await dispatchUpscaleTask(req, commonBody, imageFiles[0], responseSource('image_upscale'));
     }
 
     const wantsVideo = normalizedOperation.includes('video')
       || toolTypes.includes('dreamina_video_generation')
+      || toolTypes.includes('video_generation')
       || videoFiles.length > 0
       || audioFiles.length > 0
       || Boolean(metadata.video_resolution)
@@ -1430,11 +1455,11 @@ const createResponsesDispatch = async (req: Request): Promise<DispatchResult> =>
       || ['text2video', 'image2video', 'frames2video', 'multiframe2video', 'multimodal2video'].includes(String(metadata.mode || '').toLowerCase());
 
     if (wantsVideo) {
-      return await dispatchVideoTask(req, { ...commonBody, mode: metadata.mode || operation || 'auto' }, filesMap);
+      return await dispatchVideoTask(req, { ...commonBody, mode: metadata.mode || operation || 'auto' }, filesMap, responseSource('dreamina_video_generation'));
     }
 
     if (!toolTypes.length || toolTypes.includes('image_generation') || normalizedOperation.includes('image') || imageFiles.length > 0) {
-      return await dispatchImageTask(req, commonBody, imageFiles);
+      return await dispatchImageTask(req, commonBody, imageFiles, responseSource('image_generation'));
     }
 
     throw httpError(400, 'Responses request must use image_generation, dreamina_video_generation, or metadata.operation.');
@@ -1492,6 +1517,8 @@ const dispatchQueuedTask = async (
     type: string;
     model: string | null;
     prompt: string;
+    entrypoint?: string;
+    toolType?: string;
   }
 ): Promise<DispatchResult> => {
   let account: any = null;
@@ -1504,6 +1531,8 @@ const dispatchQueuedTask = async (
         submit_id: 'dry_run',
         task_type: options.type,
         model: options.model,
+        entrypoint: options.entrypoint,
+        tool_type: options.toolType,
         command: options.command,
         dry_run: true,
       };
@@ -1539,6 +1568,8 @@ const dispatchQueuedTask = async (
           type: options.type,
           model: options.model,
           prompt: options.prompt,
+          entrypoint: options.entrypoint,
+          toolType: options.toolType,
         },
       });
       await tx.apiKey.update({
@@ -1636,6 +1667,8 @@ const dispatchQueuedTask = async (
         submit_id: info.submitId,
         task_type: options.type,
         model: options.model,
+        entrypoint: options.entrypoint,
+        tool_type: options.toolType,
       };
     } catch (cmdErr: any) {
       await prisma.task.update({
@@ -1665,7 +1698,8 @@ const dispatchQueuedTask = async (
 const dispatchImageTask = async (
   req: Request,
   body: Record<string, any>,
-  files: Express.Multer.File[]
+  files: Express.Multer.File[],
+  source: TaskSource = {}
 ): Promise<DispatchResult> => {
   try {
     const hasImages = files.length > 0;
@@ -1718,6 +1752,8 @@ const dispatchImageTask = async (
       type: dbTaskType,
       model: publicModel,
       prompt: prompt || '',
+      entrypoint: source.entrypoint,
+      toolType: source.toolType || 'image_generation',
     });
   } finally {
     cleanupUploadedFiles(files);
@@ -1727,7 +1763,8 @@ const dispatchImageTask = async (
 const dispatchUpscaleTask = async (
   req: Request,
   body: Record<string, any>,
-  file: Express.Multer.File | undefined
+  file: Express.Multer.File | undefined,
+  source: TaskSource = {}
 ): Promise<DispatchResult> => {
   try {
     if (!file) throw httpError(400, 'image file is required');
@@ -1757,6 +1794,8 @@ const dispatchUpscaleTask = async (
       type: 'image_upscale',
       model: aliasId || 'jimeng-upscale',
       prompt: `upscale:${resolutionType}`,
+      entrypoint: source.entrypoint,
+      toolType: source.toolType || 'image_upscale',
     });
   } finally {
     cleanupUploadedFile(file);
@@ -1766,7 +1805,8 @@ const dispatchUpscaleTask = async (
 const dispatchVideoTask = async (
   req: Request,
   body: Record<string, any>,
-  filesMap: { [fieldname: string]: Express.Multer.File[] }
+  filesMap: { [fieldname: string]: Express.Multer.File[] },
+  source: TaskSource = {}
 ): Promise<DispatchResult> => {
   const allFiles: Express.Multer.File[] = [
     ...(filesMap.image || []),
@@ -1989,6 +2029,8 @@ const dispatchVideoTask = async (
       type: mode,
       model: dbModel,
       prompt: prompt || '',
+      entrypoint: source.entrypoint,
+      toolType: source.toolType || 'dreamina_video_generation',
     });
   } finally {
     cleanupUploadedFiles(allFiles);
@@ -2107,7 +2149,7 @@ router.post('/videos', apiKeyAuth, upload.any(), async (req: Request, res: Respo
     markSubmitProgress(req, 'preparing_request', { detail: 'normalizing OpenAI videos.create request' });
     const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
     const body = normalizeOpenAIVideoBody(req.body || {});
-    const result = await dispatchVideoTask(req, body, filesMap);
+    const result = await dispatchVideoTask(req, body, filesMap, { entrypoint: 'videos', toolType: 'video_generation' });
     return res.json(buildOpenAIVideoObjectFromDispatch(result));
   } catch (err: any) {
     markSubmitFailure(req, err);
@@ -2142,7 +2184,7 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
   try {
     markSubmitProgress(req, 'preparing_request', { detail: 'normalizing legacy image generation request' });
     const files = (req.files as Express.Multer.File[] | undefined) || [];
-    const result = await dispatchImageTask(req, req.body || {}, files);
+    const result = await dispatchImageTask(req, req.body || {}, files, { entrypoint: 'legacy_images', toolType: 'image_generation' });
     return res.json({
       id: result.id,
       status: result.status,
@@ -2151,6 +2193,8 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
       command: result.command,
       task_type: result.task_type,
       model: result.model,
+      entrypoint: result.entrypoint,
+      tool_type: result.tool_type,
       poll_url: `/v1/tasks/${result.id}`,
       queue: { status: result.dry_run ? 'completed' : 'submitted', progress: result.dry_run ? 100 : 0 },
     });
@@ -2162,7 +2206,7 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
 router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: Request, res: Response) => {
   try {
     markSubmitProgress(req, 'preparing_request', { detail: 'normalizing image upscale request' });
-    const result = await dispatchUpscaleTask(req, req.body || {}, req.file as Express.Multer.File | undefined);
+    const result = await dispatchUpscaleTask(req, req.body || {}, req.file as Express.Multer.File | undefined, { entrypoint: 'images_upscale', toolType: 'image_upscale' });
     return res.json({
       id: result.id,
       status: result.status,
@@ -2171,6 +2215,8 @@ router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: R
       command: result.command,
       task_type: result.task_type,
       model: result.model,
+      entrypoint: result.entrypoint,
+      tool_type: result.tool_type,
       poll_url: `/v1/tasks/${result.id}`,
       queue: { status: result.dry_run ? 'completed' : 'submitted', progress: result.dry_run ? 100 : 0 },
     });
@@ -2183,7 +2229,7 @@ router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request
   try {
     markSubmitProgress(req, 'preparing_request', { detail: 'normalizing legacy video generation request' });
     const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
-    const result = await dispatchVideoTask(req, req.body || {}, filesMap);
+    const result = await dispatchVideoTask(req, req.body || {}, filesMap, { entrypoint: 'legacy_videos', toolType: 'dreamina_video_generation' });
     return res.json({
       id: result.id,
       status: result.status,
@@ -2192,6 +2238,8 @@ router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request
       command: result.command,
       task_type: result.task_type,
       model: result.model,
+      entrypoint: result.entrypoint,
+      tool_type: result.tool_type,
       poll_url: `/v1/tasks/${result.id}`,
       video_poll_url: videoPollUrl(result.id),
       queue: { status: result.dry_run ? 'completed' : 'submitted', progress: result.dry_run ? 100 : 0 },
@@ -2216,15 +2264,15 @@ router.get('/tasks/:id', apiKeyAuth, async (req: Request, res: Response) => {
     const queue = compactQueueInfo(task, task.status === 'SUCCESS' ? 'completed' : task.status === 'FAILED' ? 'failed' : 'processing');
     const progress = taskProgressPercent(task, task.status === 'SUCCESS' ? 'completed' : task.status === 'FAILED' ? 'failed' : 'queued');
     if (task.status === "SUCCESS") {
-      return res.json({ id: task.id, status: "success", progress, queue, data: [{ url: task.resultUrl }] });
+      return res.json({ id: task.id, status: "success", task_type: task.type, entrypoint: task.entrypoint, tool_type: task.toolType, progress, queue, data: [{ url: task.resultUrl }] });
     }
     if (task.status === "FAILED") {
-      return res.json({ id: task.id, status: "failed", progress, queue, error: task.errorMsg || "Generation failed" });
+      return res.json({ id: task.id, status: "failed", task_type: task.type, entrypoint: task.entrypoint, tool_type: task.toolType, progress, queue, error: task.errorMsg || "Generation failed" });
     }
 
     // If it's PENDING or PROCESSING, just return processing. The daemon handles the CLI.
     // Surface polling warnings without marking the queued Dreamina task as failed.
-    const response: any = { id: task.id, status: "processing", progress, queue };
+    const response: any = { id: task.id, status: "processing", task_type: task.type, entrypoint: task.entrypoint, tool_type: task.toolType, progress, queue };
     if ((task as any).pollErrorMsg) {
       response.poll_warning = (task as any).pollErrorMsg;
     }

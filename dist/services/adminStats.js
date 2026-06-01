@@ -34,6 +34,30 @@ function formatPromptPreview(value, maxLength = 72) {
         return text;
     return `${text.slice(0, maxLength - 1)}...`;
 }
+const VIDEO_TASK_TYPES = new Set(['text2video', 'image2video', 'frames2video', 'multiframe2video', 'multimodal2video']);
+function normalizeToolType(toolType, taskType) {
+    const explicit = String(toolType || '').trim();
+    if (explicit) {
+        if (explicit === 'video_generation')
+            return 'dreamina_video_generation';
+        return explicit;
+    }
+    const type = String(taskType || '').trim();
+    if (type === 'image_upscale')
+        return 'image_upscale';
+    if (type === 'text2image' || type === 'image2image')
+        return 'image_generation';
+    if (VIDEO_TASK_TYPES.has(type))
+        return 'dreamina_video_generation';
+    return type || 'unknown';
+}
+function toolTypeLabel(toolType) {
+    return {
+        image_generation: '图片生成工具',
+        dreamina_video_generation: '视频生成工具',
+        image_upscale: '图片放大工具',
+    }[toolType] || toolType;
+}
 function buildTimeline(days, baseDate) {
     const buckets = Array.from({ length: days }, (_, index) => {
         const date = new Date(baseDate);
@@ -57,7 +81,7 @@ async function collectAdminStats() {
     const timelineDays = 7;
     const timelineStart = startOfDay(new Date(now.getTime() - (timelineDays - 1) * 24 * 60 * 60 * 1000));
     const { buckets: timelineBuckets, bucketMap: timelineBucketMap } = buildTimeline(timelineDays, now);
-    const [accounts, accountStatusRows, taskStatusRows, taskTypeRows, taskModelRows, apiKeyTotal, apiKeyActive, apiKeyBound, taskTotal, taskTodayTotal, taskTodaySuccess, taskTodayFailed, taskTodayProcessing, accountTaskTotalRows, accountTaskTodayRows, accountTaskProcessingRows, accountTaskTodaySuccessRows, accountTaskFailedRows, accountTaskTodayFailedRows, failedPromptRows, failedReasonRows, failedModelRows, failedAccountRows, recentWindowTasks, recentFailedTasks,] = await Promise.all([
+    const [accounts, accountStatusRows, taskStatusRows, taskTypeRows, taskModelRows, taskToolRows, taskToolTodayRows, apiKeyTotal, apiKeyActive, apiKeyBound, taskTotal, taskTodayTotal, taskTodaySuccess, taskTodayFailed, taskTodayProcessing, accountTaskTotalRows, accountTaskTodayRows, accountTaskProcessingRows, accountTaskTodaySuccessRows, accountTaskFailedRows, accountTaskTodayFailedRows, failedPromptRows, failedReasonRows, failedModelRows, failedAccountRows, recentWindowTasks, recentFailedTasks,] = await Promise.all([
         prisma.jimengAccount.findMany({
             orderBy: { createdAt: 'asc' },
             select: {
@@ -73,6 +97,8 @@ async function collectAdminStats() {
         prisma.task.groupBy({ by: ['status'], _count: { _all: true } }),
         prisma.task.groupBy({ by: ['type'], _count: { _all: true } }),
         prisma.task.groupBy({ by: ['model'], where: { model: { not: null } }, _count: { _all: true } }),
+        prisma.task.groupBy({ by: ['toolType', 'type', 'status'], _count: { _all: true } }),
+        prisma.task.groupBy({ by: ['toolType', 'type', 'status'], where: { createdAt: { gte: todayStart } }, _count: { _all: true } }),
         prisma.apiKey.count(),
         prisma.apiKey.count({ where: { isActive: true } }),
         prisma.apiKey.count({ where: { boundAccountId: { not: null } } }),
@@ -124,6 +150,8 @@ async function collectAdminStats() {
                 prompt: true,
                 model: true,
                 type: true,
+                entrypoint: true,
+                toolType: true,
                 status: true,
                 errorMsg: true,
                 pollErrorMsg: true,
@@ -200,6 +228,59 @@ async function collectAdminStats() {
         lastUpdatedAt: row._max?.updatedAt ?? null,
     }))
         .filter((row) => row.id)).slice(0, 10);
+    const toolMetrics = new Map();
+    const ensureToolMetric = (toolType) => {
+        if (!toolMetrics.has(toolType)) {
+            toolMetrics.set(toolType, {
+                toolType,
+                label: toolTypeLabel(toolType),
+                total: 0,
+                success: 0,
+                failed: 0,
+                processing: 0,
+                pending: 0,
+                todayTotal: 0,
+                todayFailed: 0,
+            });
+        }
+        return toolMetrics.get(toolType);
+    };
+    for (const row of taskToolRows) {
+        const metric = ensureToolMetric(normalizeToolType(row.toolType, row.type));
+        const count = row._count._all;
+        metric.total += count;
+        if (row.status === 'SUCCESS')
+            metric.success += count;
+        if (row.status === 'FAILED')
+            metric.failed += count;
+        if (row.status === 'PROCESSING')
+            metric.processing += count;
+        if (row.status === 'PENDING')
+            metric.pending += count;
+    }
+    for (const row of taskToolTodayRows) {
+        const metric = ensureToolMetric(normalizeToolType(row.toolType, row.type));
+        const count = row._count._all;
+        metric.todayTotal += count;
+        if (row.status === 'FAILED')
+            metric.todayFailed += count;
+    }
+    const toolRows = Array.from(toolMetrics.values()).map((metric) => ({
+        ...metric,
+        active: metric.processing + metric.pending,
+        failureRate: metric.total > 0 ? metric.failed / metric.total : 0,
+        todayFailureRate: metric.todayTotal > 0 ? metric.todayFailed / metric.todayTotal : 0,
+    })).sort((a, b) => b.total - a.total || b.active - a.active || a.label.localeCompare(b.label));
+    const toolTotals = toolRows.reduce((acc, row) => {
+        acc.total += row.total;
+        acc.success += row.success;
+        acc.failed += row.failed;
+        acc.processing += row.processing;
+        acc.pending += row.pending;
+        acc.todayTotal += row.todayTotal;
+        acc.todayFailed += row.todayFailed;
+        return acc;
+    }, { total: 0, success: 0, failed: 0, processing: 0, pending: 0, todayTotal: 0, todayFailed: 0 });
     for (const task of recentWindowTasks) {
         const bucket = timelineBucketMap.get(formatDateKey(new Date(task.createdAt)));
         if (!bucket)
@@ -274,6 +355,21 @@ async function collectAdminStats() {
             byModel: sortByCountDesc(taskModelRows
                 .map((row) => ({ model: String(row.model ?? ''), count: row._count._all }))
                 .filter((row) => row.model)).slice(0, 10),
+        },
+        tools: {
+            total: toolTotals.total,
+            success: toolTotals.success,
+            failed: toolTotals.failed,
+            processing: toolTotals.processing,
+            pending: toolTotals.pending,
+            active: toolTotals.processing + toolTotals.pending,
+            failureRate: toolTotals.total > 0 ? toolTotals.failed / toolTotals.total : 0,
+            today: {
+                total: toolTotals.todayTotal,
+                failed: toolTotals.todayFailed,
+                failureRate: toolTotals.todayTotal > 0 ? toolTotals.todayFailed / toolTotals.todayTotal : 0,
+            },
+            byType: toolRows,
         },
         failures: {
             total: taskStatusMap.get('FAILED') ?? 0,

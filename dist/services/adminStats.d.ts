@@ -75,6 +75,21 @@ export declare function collectAdminStats(): Promise<{
             count: any;
         }[];
     };
+    tools: {
+        total: any;
+        success: any;
+        failed: any;
+        processing: any;
+        pending: any;
+        active: any;
+        failureRate: number;
+        today: {
+            total: any;
+            failed: any;
+            failureRate: number;
+        };
+        byType: any[];
+    };
     failures: {
         total: number;
         today: number;
@@ -111,6 +126,8 @@ export declare function collectAdminStats(): Promise<{
             type: string;
             model: string | null;
             prompt: string;
+            entrypoint: string | null;
+            toolType: string | null;
             jimengSubmitId: string | null;
             jimengLogId: string | null;
             status: string;

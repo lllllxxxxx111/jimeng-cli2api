@@ -45,6 +45,7 @@ const taskFilterStatus = ref('');
 const taskFilterPrompt = ref('');
 const taskFilterError = ref('');
 const taskFilterAccountId = ref('');
+const taskFilterTool = ref('');
 const taskLoading = ref(false);
 const taskDetail = ref<any>(null);
 const taskLiveStatus = ref<any>(null);
@@ -123,6 +124,7 @@ const tabMeta: Record<string, { title: string; subtitle: string }> = {
   tasks: { title: '任务管理', subtitle: '追踪生成任务、失败原因和轮询状态' },
   risk: { title: '失败预检', subtitle: '提交前比对历史失败提示词' },
   native: { title: '原生工具', subtitle: '面向管理员的 CLI 会话、任务和结果查询' },
+  toolTest: { title: '工具测试', subtitle: '测试 Responses 工具调用，验证其他模型后续可调用的工具入口' },
   docs: { title: '集成文档', subtitle: '查看 OpenAI SDK 兼容入口和即梦扩展参数' },
   sdkTest: { title: '接口测试', subtitle: '直接测试 OpenAI SDK 兼容接口和轮询结果' },
   settings: { title: '管理员安全', subtitle: '修改后台访问密码' },
@@ -252,6 +254,7 @@ const pageSubtitle = () => tabMeta[currentTab.value]?.subtitle || '';
 
 const availableAccountCount = () => stats.value?.accounts?.idle ?? accounts.value.filter((item: any) => item.status === 'IDLE').length;
 const processingTaskCount = () => stats.value?.tasks?.processing ?? tasks.value.filter((item: any) => item.status === 'PROCESSING').length;
+const activeToolTaskCount = () => stats.value?.tools?.active ?? 0;
 const todaySuccessCount = () => stats.value?.tasks?.today?.success ?? 0;
 const riskScorePercent = (value: number) => `${Math.round((Number(value) || 0) * 100)}%`;
 const riskLevelClass = (level: string) => ({
@@ -366,6 +369,24 @@ const getAccountMetrics = (accountId: string) => {
   return row || { totalCreatives: 0, todayCreatives: 0, processingTasks: 0, todaySuccess: 0, failedTasks: 0, todayFailed: 0 };
 };
 
+const videoTaskTypes = new Set(['text2video', 'image2video', 'frames2video', 'multiframe2video', 'multimodal2video']);
+const normalizeToolType = (toolType = '', taskType = '') => {
+  const explicit = String(toolType || '').trim();
+  if (explicit) return explicit === 'video_generation' ? 'dreamina_video_generation' : explicit;
+  const type = String(taskType || '').trim();
+  if (type === 'image_upscale') return 'image_upscale';
+  if (type === 'text2image' || type === 'image2image') return 'image_generation';
+  if (videoTaskTypes.has(type)) return 'dreamina_video_generation';
+  return type || '';
+};
+const toolTypeLabel = (toolType = '') => ({
+  image_generation: '图片生成工具',
+  dreamina_video_generation: '视频生成工具',
+  image_upscale: '图片放大工具',
+} as Record<string, string>)[toolType] || toolType || '-';
+const taskToolLabel = (task: any) => toolTypeLabel(normalizeToolType(task?.toolType, task?.type));
+const toolStatsRows = () => stats.value?.tools?.byType || [];
+
 const navGroups = [
   {
     title: '总览',
@@ -386,6 +407,7 @@ const navGroups = [
     title: '集成',
     items: [
       { key: 'sdkTest', label: '接口测试', badge: 'TRY' },
+      { key: 'toolTest', label: '工具测试', badge: () => activeToolTaskCount() || 'TOOL' },
       { key: 'docs', label: '接口文档', badge: 'SDK' },
       { key: 'native', label: '原生工具', badge: 'CLI' },
     ],
@@ -415,6 +437,16 @@ const setTab = (tab: string) => {
     fetchStats();
   }
   if (tab === 'tasks') fetchTasks(1);
+  if (tab === 'sdkTest' || tab === 'toolTest') {
+    if (tab === 'toolTest' && !sdkMode.value.startsWith('responses-tool-')) {
+      sdkMode.value = 'responses-tool-image';
+    }
+    if (tab === 'sdkTest' && sdkMode.value.startsWith('responses-tool-')) {
+      sdkMode.value = 'models';
+    }
+    fetchApiKeys();
+    fetchStats();
+  }
 };
 
 const openTaskList = (status = '') => {
@@ -422,6 +454,7 @@ const openTaskList = (status = '') => {
   taskFilterAccountId.value = '';
   taskFilterPrompt.value = '';
   taskFilterError.value = '';
+  taskFilterTool.value = '';
   currentTab.value = 'tasks';
   fetchTasks(1);
 };
@@ -696,6 +729,8 @@ const useSelectedSdkKey = () => {
 
 const sdkModeOptions = [
   { value: 'models', label: '模型列表', endpoint: 'GET /v1/models', cost: '不消耗额度', hint: '先用它验证 Key 和服务可用性。', legacy: false },
+  { value: 'responses-tool-image', label: '工具生图', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: '只发送 image_generation 工具声明，用来验证后续 agent/其他模型调用工具的入口。', legacy: false, tool: true },
+  { value: 'responses-tool-video', label: '工具生视频', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: '只发送 dreamina_video_generation 工具声明，并返回可轮询的视频任务。', legacy: false, tool: true },
   { value: 'responses-image', label: 'Responses 文生图', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: 'OpenAI SDK 推荐入口，返回 resp_*。', legacy: false },
   { value: 'responses-video', label: 'Responses 生视频', endpoint: 'POST /v1/responses', cost: '会创建真实任务', hint: '用 metadata 指定视频模式和清晰度。', legacy: false },
   { value: 'videos-create', label: 'Videos SDK', endpoint: 'POST /v1/videos', cost: '会创建真实任务', hint: '兼容 OpenAI videos.create / retrieve。', legacy: false },
@@ -703,7 +738,7 @@ const sdkModeOptions = [
   { value: 'legacy-video', label: '老接口生视频', endpoint: 'POST /v1/videos/generations', cost: '会创建真实任务', hint: '旧版视频表单入口。', legacy: true },
 ];
 
-const primarySdkModeOptions = () => sdkModeOptions.filter(item => !item.legacy);
+const primarySdkModeOptions = () => sdkModeOptions.filter(item => currentTab.value === 'toolTest' ? (item as any).tool : (!item.legacy && !(item as any).tool));
 
 const legacySdkModeOptions = () => sdkModeOptions.filter(item => item.legacy);
 
@@ -812,11 +847,14 @@ const legacySdkModels = (models: any[]) => models.filter((item: any) => !String(
 
 const sdkEndpoint = () => {
   if (sdkMode.value === 'models') return { method: 'GET', path: '/v1/models', contentType: 'json' };
-  if (sdkMode.value === 'responses-image' || sdkMode.value === 'responses-video') return { method: 'POST', path: '/v1/responses', contentType: 'json' };
+  if (sdkMode.value === 'responses-image' || sdkMode.value === 'responses-video' || sdkMode.value.startsWith('responses-tool-')) return { method: 'POST', path: '/v1/responses', contentType: 'json' };
   if (sdkMode.value === 'videos-create') return { method: 'POST', path: '/v1/videos', contentType: 'json' };
   if (sdkMode.value === 'legacy-image') return { method: 'POST', path: '/v1/images/generations', contentType: 'form' };
   return { method: 'POST', path: '/v1/videos/generations', contentType: 'form' };
 };
+
+const sdkIsImageMode = () => sdkMode.value === 'responses-image' || sdkMode.value === 'legacy-image' || sdkMode.value === 'responses-tool-image';
+const sdkIsVideoMode = () => sdkMode.value !== 'models' && !sdkIsImageMode();
 
 const buildSdkPayload = () => {
   if (sdkMode.value === 'models') return null;
@@ -837,11 +875,43 @@ const buildSdkPayload = () => {
     };
   }
 
+  if (sdkMode.value === 'responses-tool-image') {
+    return {
+      model: sdkImageModel.value,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: sdkPrompt.value }] }],
+      tools: [{ type: 'image_generation' }],
+      metadata: {
+        operation: 'text2image',
+        ratio: sdkRatio.value,
+        resolution_type: sdkResolution.value || undefined,
+        session,
+        ...extra,
+      },
+    };
+  }
+
   if (sdkMode.value === 'responses-video') {
     return {
       model: sdkVideoModel.value,
       input: sdkPrompt.value,
       metadata: {
+        mode: sdkVideoMode.value,
+        duration: Number(sdkVideoSeconds.value) || 5,
+        ratio: sdkRatio.value,
+        video_resolution: sdkVideoResolution.value || undefined,
+        session,
+        ...extra,
+      },
+    };
+  }
+
+  if (sdkMode.value === 'responses-tool-video') {
+    return {
+      model: sdkVideoModel.value,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: sdkPrompt.value }] }],
+      tools: [{ type: 'dreamina_video_generation' }],
+      metadata: {
+        operation: 'text2video',
         mode: sdkVideoMode.value,
         duration: Number(sdkVideoSeconds.value) || 5,
         ratio: sdkRatio.value,
@@ -1701,6 +1771,7 @@ const fetchTasks = async (page = taskPage.value) => {
     if (taskFilterPrompt.value) params.set('prompt', taskFilterPrompt.value);
     if (taskFilterError.value) params.set('error', taskFilterError.value);
     if (taskFilterAccountId.value) params.set('accountId', taskFilterAccountId.value);
+    if (taskFilterTool.value) params.set('tool', taskFilterTool.value);
     const res = await authFetch(`/admin/tasks?${params}`);
     const data = await res.json();
     tasks.value = data.tasks || [];
@@ -1718,6 +1789,7 @@ const clearTaskFilters = () => {
   taskFilterPrompt.value = '';
   taskFilterError.value = '';
   taskFilterAccountId.value = '';
+  taskFilterTool.value = '';
 };
 
 const inspectFailurePrompt = (item: any) => {
@@ -1726,6 +1798,7 @@ const inspectFailurePrompt = (item: any) => {
   taskFilterPrompt.value = item.prompt || '';
   taskFilterError.value = '';
   taskFilterAccountId.value = '';
+  taskFilterTool.value = '';
   fetchTasks(1);
 };
 
@@ -1735,6 +1808,7 @@ const inspectFailureReason = (item: any) => {
   taskFilterPrompt.value = '';
   taskFilterError.value = item.reason || '';
   taskFilterAccountId.value = '';
+  taskFilterTool.value = '';
   fetchTasks(1);
 };
 
@@ -1821,6 +1895,17 @@ const inspectAccountTasks = (accountId: string) => {
   taskFilterStatus.value = '';
   taskFilterPrompt.value = '';
   taskFilterError.value = '';
+  taskFilterTool.value = '';
+  fetchTasks(1);
+};
+
+const inspectToolTasks = (toolType: string, status = '') => {
+  currentTab.value = 'tasks';
+  taskFilterTool.value = toolType || '';
+  taskFilterStatus.value = status;
+  taskFilterAccountId.value = '';
+  taskFilterPrompt.value = '';
+  taskFilterError.value = '';
   fetchTasks(1);
 };
 
@@ -1830,6 +1915,7 @@ const inspectFailedTask = (task: any) => {
   taskFilterPrompt.value = task.prompt || '';
   taskFilterError.value = '';
   taskFilterAccountId.value = task.account?.id || '';
+  taskFilterTool.value = normalizeToolType(task.toolType, task.type);
   taskDetail.value = task;
   fetchTasks(1);
 };
@@ -2264,7 +2350,7 @@ onMounted(() => {
       <!-- ========== TAB: MONITOR ========== -->
       <div v-if="currentTab === 'monitor'" class="space-y-6">
         <div class="bg-white border border-slate-200 shadow-sm p-5 flex flex-col 2xl:flex-row 2xl:items-center 2xl:justify-between gap-5">
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-4 flex-1">
+          <div class="grid grid-cols-1 md:grid-cols-5 gap-4 flex-1">
             <div class="border border-slate-200 bg-slate-50 p-4">
               <p class="text-xs font-black text-slate-500">1. 账号就绪</p>
               <p class="text-2xl font-black text-slate-900 mt-2">{{ availableAccountCount() }}</p>
@@ -2276,12 +2362,17 @@ onMounted(() => {
               <p class="text-xs text-slate-500 mt-1">正在执行的 CLI 任务</p>
             </div>
             <div class="border border-slate-200 bg-slate-50 p-4">
-              <p class="text-xs font-black text-slate-500">3. 今日产出</p>
+              <p class="text-xs font-black text-slate-500">3. 工具任务</p>
+              <p class="text-2xl font-black text-slate-900 mt-2">{{ stats?.tools?.active ?? 0 }}</p>
+              <p class="text-xs text-slate-500 mt-1">处理中/排队的工具调用</p>
+            </div>
+            <div class="border border-slate-200 bg-slate-50 p-4">
+              <p class="text-xs font-black text-slate-500">4. 今日产出</p>
               <p class="text-2xl font-black text-slate-900 mt-2">{{ todaySuccessCount() }}</p>
               <p class="text-xs text-slate-500 mt-1">已完成创意数</p>
             </div>
             <div class="border border-slate-200 bg-slate-50 p-4">
-              <p class="text-xs font-black text-slate-500">4. 当前判断</p>
+              <p class="text-xs font-black text-slate-500">5. 当前判断</p>
               <div class="flex items-center gap-2 mt-2">
                 <span class="w-2.5 h-2.5 rounded-full" :class="operationHealth().accentClass"></span>
                 <span class="text-lg font-black px-2 py-1 rounded-lg" :class="operationHealth().className">{{ operationHealth().label }}</span>
@@ -2300,7 +2391,7 @@ onMounted(() => {
         <div v-if="statsLoading && !stats" class="text-center py-20 text-slate-400 bg-white border border-slate-200">运行数据加载中...</div>
 
         <template v-if="stats">
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4">
             <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">账号池</p>
               <p class="text-3xl font-black text-slate-800 mt-2">{{ stats.accounts.total }}</p>
@@ -2310,6 +2401,11 @@ onMounted(() => {
               <p class="text-xs font-bold text-slate-400 uppercase">任务总数</p>
               <p class="text-3xl font-black text-slate-800 mt-2">{{ stats.tasks.total }}</p>
               <p class="text-xs text-slate-500 mt-1">处理中 {{ stats.tasks.processing }} · 待处理 {{ stats.tasks.pending }}</p>
+            </div>
+            <div class="bg-white border border-slate-200 p-5 shadow-sm">
+              <p class="text-xs font-bold text-slate-400 uppercase">工具调用</p>
+              <p class="text-3xl font-black text-indigo-600 mt-2">{{ stats.tools.total }}</p>
+              <p class="text-xs text-slate-500 mt-1">处理中 {{ stats.tools.active }} · 失败 {{ stats.tools.failed }}</p>
             </div>
             <div class="bg-white border border-slate-200 p-5 shadow-sm">
               <p class="text-xs font-bold text-slate-400 uppercase">今日创意</p>
@@ -2359,6 +2455,46 @@ onMounted(() => {
                   <span class="text-right text-slate-500">{{ day.total }} 条</span>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <div class="bg-white border border-slate-200 shadow-sm overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-black text-slate-800">工具运行矩阵</h3>
+              <button @click="setTab('toolTest')" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">打开工具测试</button>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">工具</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">总调用</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">处理中</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">今日</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">失败率</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                  <tr v-if="toolStatsRows().length === 0"><td colspan="6" class="text-center py-10 text-slate-400">暂无工具调用数据</td></tr>
+                  <tr v-for="row in toolStatsRows()" :key="row.toolType" class="hover:bg-slate-50">
+                    <td class="px-4 py-3">
+                      <p class="font-semibold text-slate-800">{{ row.label }}</p>
+                      <p class="text-xs text-slate-400 font-mono">{{ row.toolType }}</p>
+                    </td>
+                    <td class="px-4 py-3 text-xs text-slate-600">{{ row.total }} <span class="text-slate-400">成功 {{ row.success }}</span></td>
+                    <td class="px-4 py-3 text-xs text-blue-600">{{ row.active }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-600">{{ row.todayTotal }} <span class="text-red-400">失败 {{ row.todayFailed }}</span></td>
+                    <td class="px-4 py-3 text-xs" :class="row.failureRate >= 0.2 ? 'text-red-500 font-bold' : 'text-slate-500'">{{ formatRate(row.failureRate) }}</td>
+                    <td class="px-4 py-3">
+                      <div class="flex flex-wrap gap-2">
+                        <button @click="inspectToolTasks(row.toolType)" class="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg">查看任务</button>
+                        <button @click="inspectToolTasks(row.toolType, 'FAILED')" class="text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg">失败</button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
 
@@ -2460,6 +2596,7 @@ onMounted(() => {
                 <thead class="bg-slate-50 border-b border-slate-200">
                   <tr>
                     <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">提示词</th>
+                    <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">工具</th>
                     <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">模型</th>
                     <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">账号</th>
                     <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase">失败原因</th>
@@ -2468,9 +2605,10 @@ onMounted(() => {
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
-                  <tr v-if="stats.failures.recent.length === 0"><td colspan="6" class="text-center py-10 text-slate-400">暂无失败任务</td></tr>
+                  <tr v-if="stats.failures.recent.length === 0"><td colspan="7" class="text-center py-10 text-slate-400">暂无失败任务</td></tr>
                   <tr v-for="task in stats.failures.recent" :key="task.id" class="hover:bg-slate-50">
                     <td class="px-4 py-3 text-xs text-slate-700 max-w-md break-words">{{ shortText(task.prompt, 110) || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ taskToolLabel(task) }}</td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
                     <td class="px-4 py-3 text-xs text-red-500 max-w-sm break-words">{{ shortText(task.errorMsg || task.pollErrorMsg, 100) || '-' }}</td>
@@ -2928,15 +3066,15 @@ onMounted(() => {
       </div>
 
       <!-- ========== TAB: SDK TEST ========== -->
-      <div v-if="currentTab === 'sdkTest'" class="space-y-6">
+      <div v-if="currentTab === 'sdkTest' || currentTab === 'toolTest'" class="space-y-6">
         <div class="bg-white border border-slate-200 shadow-sm p-6">
           <div class="grid grid-cols-1 2xl:grid-cols-[1fr_360px] gap-6">
             <div class="space-y-5">
               <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
                 <div>
-                  <p class="text-xs font-black text-indigo-600 uppercase tracking-wider">OpenAI SDK Test</p>
-                  <h3 class="text-2xl font-black text-slate-900 mt-1">接口测试台</h3>
-                  <p class="text-sm text-slate-500 mt-2 leading-6">这里直接调用当前服务的 <code class="bg-slate-100 px-1 rounded font-mono">/v1</code> 接口。生成类请求会消耗账号额度，建议先用“模型列表”验证 Key。</p>
+                  <p class="text-xs font-black text-indigo-600 uppercase tracking-wider">{{ currentTab === 'toolTest' ? 'OpenAI Tool Test' : 'OpenAI SDK Test' }}</p>
+                  <h3 class="text-2xl font-black text-slate-900 mt-1">{{ currentTab === 'toolTest' ? '工具测试台' : '接口测试台' }}</h3>
+                  <p class="text-sm text-slate-500 mt-2 leading-6">{{ currentTab === 'toolTest' ? '这里验证 Responses tools 入口，后续其他模型或 agent 可以按同样结构调用生图/生视频工具。' : '这里直接调用当前服务的 /v1 接口。生成类请求会消耗账号额度，建议先用“模型列表”验证 Key。' }}</p>
                 </div>
                 <div class="flex flex-wrap gap-2 w-full xl:w-auto">
                   <button @click="runSdkTest" :disabled="sdkLoading" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-black">{{ sdkLoading ? '请求中...' : '发送测试请求' }}</button>
@@ -2963,7 +3101,7 @@ onMounted(() => {
                       <p class="text-xs text-slate-500 mt-2 leading-5">{{ mode.hint }}</p>
                     </button>
                   </div>
-                  <div class="mt-3">
+                  <div v-if="currentTab !== 'toolTest'" class="mt-3">
                     <button @click="sdkShowLegacyModes = !sdkShowLegacyModes" class="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">{{ sdkShowLegacyModes ? '收起兼容旧接口' : '兼容旧接口' }}</button>
                     <div v-if="sdkShowLegacyModes" class="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
                       <button
@@ -3004,13 +3142,13 @@ onMounted(() => {
                   <label class="block text-sm font-bold text-slate-700 mb-2">Prompt / input</label>
                   <textarea v-model="sdkPrompt" rows="4" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white resize-y leading-6"></textarea>
                 </div>
-                <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
+                <div v-if="sdkIsImageMode()">
                   <label class="block text-sm font-bold text-slate-700 mb-2">图片模型</label>
                   <select v-model="sdkImageModel" @change="syncSdkImageResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                     <option v-for="model in sdkModelOptions.image" :key="model.value" :value="model.value">{{ model.label }}</option>
                   </select>
                 </div>
-                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                <div v-if="sdkIsVideoMode()">
                   <label class="block text-sm font-bold text-slate-700 mb-2">视频模型</label>
                   <select v-model="sdkVideoModel" @change="syncSdkVideoOptions" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                     <option v-for="model in sdkModelOptions.video" :key="model.value" :value="model.value">{{ model.label }}</option>
@@ -3028,7 +3166,7 @@ onMounted(() => {
                     <option value="21:9">21:9</option>
                   </select>
                 </div>
-                <div v-if="sdkMode === 'responses-image' || sdkMode === 'legacy-image'">
+                <div v-if="sdkIsImageMode()">
                   <label class="block text-sm font-bold text-slate-700 mb-2">图片清晰度</label>
                   <select v-model="sdkResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                     <option v-for="item in sdkImageResolutionOptions()" :key="item.value" :value="item.value">{{ item.label }}</option>
@@ -3042,7 +3180,7 @@ onMounted(() => {
                     <option value="720x1280">720x1280</option>
                   </select>
                 </div>
-                <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                <div v-if="sdkIsVideoMode()">
                   <label class="block text-sm font-bold text-slate-700 mb-2">视频秒数</label>
                   <input v-model.number="sdkVideoSeconds" @change="syncSdkVideoOptions" type="number" :min="sdkVideoDurationRange().min" :max="sdkVideoDurationRange().max" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white" />
                   <p class="text-xs text-slate-400 mt-2">当前可用范围：{{ sdkVideoDurationRange().min }}-{{ sdkVideoDurationRange().max }} 秒</p>
@@ -3050,14 +3188,14 @@ onMounted(() => {
                 <div class="xl:col-span-2">
                   <button @click="sdkShowAdvancedParams = !sdkShowAdvancedParams" class="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">{{ sdkShowAdvancedParams ? '收起高级参数' : '高级参数' }}</button>
                   <div v-if="sdkShowAdvancedParams" class="grid grid-cols-1 xl:grid-cols-2 gap-4 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
-                    <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                    <div v-if="sdkIsVideoMode()">
                       <label class="block text-sm font-bold text-slate-700 mb-2">功能模式</label>
                       <select v-model="sdkVideoMode" @change="syncSdkVideoOptions" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                         <option v-for="mode in sdkVideoModeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
                       </select>
                       <p class="text-xs text-slate-400 mt-2">默认自动判断；多图、多关键帧或首尾帧时再调整。</p>
                     </div>
-                    <div v-if="sdkMode !== 'responses-image' && sdkMode !== 'legacy-image'">
+                    <div v-if="sdkIsVideoMode()">
                       <label class="block text-sm font-bold text-slate-700 mb-2">视频清晰度</label>
                       <select v-model="sdkVideoResolution" class="w-full border border-slate-300 px-4 py-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                         <option v-for="item in sdkVideoResolutionOptions()" :key="item.value" :value="item.value">{{ item.label }}</option>
@@ -3450,6 +3588,12 @@ onMounted(() => {
               <option value="">全部账号</option>
               <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option>
             </select>
+            <select v-model="taskFilterTool" @change="fetchTasks(1)" class="w-full xl:w-auto border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
+              <option value="">全部工具</option>
+              <option value="image_generation">图片生成工具</option>
+              <option value="dreamina_video_generation">视频生成工具</option>
+              <option value="image_upscale">图片放大工具</option>
+            </select>
             <input v-model="taskFilterPrompt" @keyup.enter="fetchTasks(1)" placeholder="搜索提示词" class="w-full xl:w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
             <input v-model="taskFilterError" @keyup.enter="fetchTasks(1)" placeholder="搜索失败原因" class="w-full xl:w-56 border border-slate-300 px-4 py-2.5 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white" />
             <button @click="fetchTasks(1)" :disabled="taskLoading" class="bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm">筛选</button>
@@ -3471,9 +3615,10 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-if="taskFilterStatus || taskFilterAccountId || taskFilterPrompt || taskFilterError" class="flex flex-wrap gap-2 text-xs">
+        <div v-if="taskFilterStatus || taskFilterAccountId || taskFilterTool || taskFilterPrompt || taskFilterError" class="flex flex-wrap gap-2 text-xs">
           <span v-if="taskFilterStatus" class="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full">状态：{{ taskFilterStatus }}</span>
           <span v-if="taskFilterAccountId" class="bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-full">账号：{{ accounts.find((acc: any) => acc.id === taskFilterAccountId)?.name || taskFilterAccountId }}</span>
+          <span v-if="taskFilterTool" class="bg-sky-50 text-sky-700 px-3 py-1.5 rounded-full">工具：{{ toolTypeLabel(taskFilterTool) }}</span>
           <span v-if="taskFilterPrompt" class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-full">提示词：{{ shortText(taskFilterPrompt, 42) }}</span>
           <span v-if="taskFilterError" class="bg-red-50 text-red-700 px-3 py-1.5 rounded-full">失败原因：{{ shortText(taskFilterError, 42) }}</span>
         </div>
@@ -3503,6 +3648,10 @@ onMounted(() => {
                   <p class="font-bold text-slate-400">模型</p>
                   <p class="font-mono text-slate-700 mt-1 break-words">{{ task.model || '-' }}</p>
                 </div>
+                <div class="col-span-2 bg-slate-50 rounded-xl p-3 min-w-0">
+                  <p class="font-bold text-slate-400">工具</p>
+                  <p class="text-slate-700 mt-1 break-words">{{ taskToolLabel(task) }}</p>
+                </div>
               </div>
               <div>
                 <p class="text-xs font-bold text-slate-400 mb-1">提示词</p>
@@ -3518,11 +3667,12 @@ onMounted(() => {
         </div>
 
         <div class="hidden md:block bg-white rounded-2xl shadow-sm border border-slate-200 overflow-x-auto">
-          <table class="w-full min-w-[960px] text-sm">
+          <table class="w-full min-w-[1080px] text-sm">
             <thead class="bg-slate-50 border-b border-slate-200">
               <tr>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">状态</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">类型</th>
+                <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">工具</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">模型</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">账号</th>
                 <th class="text-left px-4 py-3 font-bold text-slate-500 text-xs uppercase tracking-wider">提示词 / 错误</th>
@@ -3531,13 +3681,14 @@ onMounted(() => {
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
-              <tr v-if="taskLoading"><td colspan="7" class="text-center py-12 text-slate-400">加载中...</td></tr>
-              <tr v-else-if="tasks.length === 0"><td colspan="7" class="text-center py-12 text-slate-400">暂无任务</td></tr>
+              <tr v-if="taskLoading"><td colspan="8" class="text-center py-12 text-slate-400">加载中...</td></tr>
+              <tr v-else-if="tasks.length === 0"><td colspan="8" class="text-center py-12 text-slate-400">暂无任务</td></tr>
               <tr v-for="task in tasks" :key="task.id" class="hover:bg-slate-50 transition">
                 <td class="px-4 py-3">
                   <span class="text-xs font-bold px-2 py-1 rounded-full" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
                 </td>
                 <td class="px-4 py-3 text-xs font-mono text-slate-600">{{ task.type }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ taskToolLabel(task) }}</td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
                 <td class="px-4 py-3 text-xs max-w-md">

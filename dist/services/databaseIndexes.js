@@ -4,6 +4,8 @@ exports.ensureDatabaseIndexes = ensureDatabaseIndexes;
 const client_1 = require("@prisma/client");
 const prisma = new client_1.PrismaClient();
 const taskColumnStatements = [
+    { name: 'entrypoint', sql: 'ALTER TABLE "Task" ADD COLUMN "entrypoint" TEXT' },
+    { name: 'toolType', sql: 'ALTER TABLE "Task" ADD COLUMN "toolType" TEXT' },
     { name: 'queueStatus', sql: 'ALTER TABLE "Task" ADD COLUMN "queueStatus" TEXT' },
     { name: 'queueIndex', sql: 'ALTER TABLE "Task" ADD COLUMN "queueIndex" INTEGER' },
     { name: 'queueLength', sql: 'ALTER TABLE "Task" ADD COLUMN "queueLength" INTEGER' },

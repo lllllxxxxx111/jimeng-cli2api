@@ -45,6 +45,8 @@ model Task {
   type           String
   model          String?
   prompt         String
+  entrypoint     String?
+  toolType       String?
   jimengSubmitId String?
   jimengLogId    String?
   status         String         @default("PENDING")

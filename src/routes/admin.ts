@@ -1068,16 +1068,28 @@ router.delete('/apikeys/:id', async (req: Request, res: Response) => {
 // ── 任务管理 ───────────────────────────────────────────────────────
 
 // 查询任务列表（支持 status/apiKeyId/accountId 过滤，分页）
+const taskToolWhere = (tool: string) => {
+  if (tool === 'image_generation') return { OR: [{ toolType: 'image_generation' }, { type: { in: ['text2image', 'image2image'] } }] };
+  if (tool === 'dreamina_video_generation' || tool === 'video_generation') {
+    return { OR: [{ toolType: { in: ['dreamina_video_generation', 'video_generation'] } }, { type: { in: ['text2video', 'image2video', 'frames2video', 'multiframe2video', 'multimodal2video'] } }] };
+  }
+  if (tool === 'image_upscale') return { OR: [{ toolType: 'image_upscale' }, { type: 'image_upscale' }] };
+  return { toolType: tool };
+};
+
 router.get('/tasks', async (req: Request, res: Response) => {
   try {
-    const { status, accountId, prompt, error, type, model, page = '1', limit = '20' } = req.query as Record<string, string>;
+    const { status, accountId, prompt, error, type, model, tool, page = '1', limit = '20' } = req.query as Record<string, string>;
     const where: any = {};
+    const and: any[] = [];
     if (status) where.status = status;
     if (accountId) where.accountId = accountId;
     if (prompt) where.prompt = { contains: prompt };
-    if (error) where.OR = [{ errorMsg: { contains: error } }, { pollErrorMsg: { contains: error } }];
+    if (error) and.push({ OR: [{ errorMsg: { contains: error } }, { pollErrorMsg: { contains: error } }] });
     if (type) where.type = type;
     if (model) where.model = model;
+    if (tool) and.push(taskToolWhere(tool));
+    if (and.length) where.AND = and;
 
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
