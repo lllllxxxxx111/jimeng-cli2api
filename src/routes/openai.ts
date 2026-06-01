@@ -1160,11 +1160,35 @@ const mapTaskStatusToResponseStatus = (status: string) => {
   return 'in_progress';
 };
 
-const mapTaskStatusToOpenAIVideoStatus = (status: string) => {
+const mapTaskStatusToOpenAIVideoStatus = (status: string, task?: any) => {
   if (status === 'SUCCESS') return 'completed';
   if (status === 'FAILED') return 'failed';
+  const queueStatus = String(task?.queueStatus || '').toLowerCase();
+  const progress = Number(task?.progressPercent);
+  if (progress > 0 || /process|running|generat/.test(queueStatus)) return 'in_progress';
   return 'queued';
 };
+
+const taskProgressPercent = (task: any, doneStatus: string) => {
+  const progress = Number(task?.progressPercent);
+  if (Number.isFinite(progress)) return Math.max(0, Math.min(100, Math.round(progress)));
+  return doneStatus === 'completed' ? 100 : 0;
+};
+
+const compactQueueInfo = (task: any, fallbackStatus?: string) => {
+  const queue = {
+    status: task?.queueStatus || fallbackStatus || null,
+    index: task?.queueIndex ?? null,
+    length: task?.queueLength ?? null,
+    wait_seconds: task?.queueWaitSeconds ?? null,
+    progress: task?.progressPercent ?? null,
+    last_polled_at: task?.lastPolledAt ? new Date(task.lastPolledAt).toISOString() : null,
+  };
+  return Object.fromEntries(Object.entries(queue).filter(([, value]) => value !== null && value !== undefined && value !== ''));
+};
+
+const responsePollUrl = (taskId: string) => `/v1/responses/resp_${taskId}`;
+const videoPollUrl = (taskId: string) => `/v1/videos/video_${taskId}`;
 
 const buildResponseObject = (task: any) => {
   const responseId = `resp_${task.id}`;
@@ -1173,6 +1197,7 @@ const buildResponseObject = (task: any) => {
   const resultUrl = task.resultUrl || null;
   const isVideo = VIDEO_TASK_TYPES.includes(task.type);
   const outputType = isVideo ? 'dreamina_video_generation_call' : 'image_generation_call';
+  const queue = compactQueueInfo(task, status === 'completed' ? 'completed' : status);
   const output: any[] = [];
 
   if (status === 'completed') {
@@ -1206,9 +1231,14 @@ const buildResponseObject = (task: any) => {
       task_type: task.type,
       log_id: task.jimengLogId,
       result_url: resultUrl,
+      poll_url: responsePollUrl(task.id),
     },
   };
 
+  if (Object.keys(queue).length > 0) {
+    response.queue = queue;
+    response.metadata.queue = queue;
+  }
   if (status === 'failed') {
     response.error = { message: task.errorMsg || 'Generation failed' };
   }
@@ -1231,8 +1261,14 @@ const buildResponseObjectFromDispatch = (result: DispatchResult) => {
       task_id: result.id,
       submit_id: result.submit_id,
       task_type: result.task_type,
+      poll_url: responsePollUrl(result.id),
+      queue: {
+        status: result.dry_run ? 'completed' : 'submitted',
+        progress: result.dry_run ? 100 : 0,
+      },
     },
   };
+  response.queue = response.metadata.queue;
   if (result.dry_run) {
     response.metadata.dry_run = true;
     response.metadata.command = result.command;
@@ -1241,17 +1277,19 @@ const buildResponseObjectFromDispatch = (result: DispatchResult) => {
 };
 
 const buildOpenAIVideoObject = (task: any) => {
-  const status = mapTaskStatusToOpenAIVideoStatus(task.status);
+  const status = mapTaskStatusToOpenAIVideoStatus(task.status, task);
   const createdAt = Math.floor(new Date(task.createdAt).getTime() / 1000);
   const resultUrl = task.resultUrl || null;
   const ratio = task.metadata?.ratio || null;
+  const queue = compactQueueInfo(task, status);
   const response: any = {
     id: `video_${task.id}`,
     object: 'video',
     created_at: createdAt,
     status,
     model: task.model || task.type,
-    progress: status === 'completed' ? 100 : 0,
+    progress: taskProgressPercent(task, status),
+    queue,
     seconds: task.metadata?.duration ?? null,
     size: ratio ? RATIO_TO_OPENAI_VIDEO_SIZE[String(ratio)] || null : null,
     metadata: {
@@ -1261,6 +1299,8 @@ const buildOpenAIVideoObject = (task: any) => {
       log_id: task.jimengLogId,
       result_url: resultUrl,
       dreamina_model: task.model,
+      poll_url: videoPollUrl(task.id),
+      queue,
     },
   };
 
@@ -1291,8 +1331,14 @@ const buildOpenAIVideoObjectFromDispatch = (result: DispatchResult) => {
       submit_id: result.submit_id,
       task_type: result.task_type,
       dreamina_model: result.model,
+      poll_url: videoPollUrl(result.id),
+      queue: {
+        status: result.dry_run ? 'completed' : 'submitted',
+        progress: result.dry_run ? 100 : 0,
+      },
     },
   };
+  response.queue = response.metadata.queue;
   if (result.dry_run) {
     response.metadata.dry_run = true;
     response.metadata.command = result.command;
@@ -2105,6 +2151,8 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
       command: result.command,
       task_type: result.task_type,
       model: result.model,
+      poll_url: `/v1/tasks/${result.id}`,
+      queue: { status: result.dry_run ? 'completed' : 'submitted', progress: result.dry_run ? 100 : 0 },
     });
   } catch (err: any) {
     markSubmitFailure(req, err);
@@ -2123,6 +2171,8 @@ router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: R
       command: result.command,
       task_type: result.task_type,
       model: result.model,
+      poll_url: `/v1/tasks/${result.id}`,
+      queue: { status: result.dry_run ? 'completed' : 'submitted', progress: result.dry_run ? 100 : 0 },
     });
   } catch (err: any) {
     markSubmitFailure(req, err);
@@ -2142,6 +2192,9 @@ router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request
       command: result.command,
       task_type: result.task_type,
       model: result.model,
+      poll_url: `/v1/tasks/${result.id}`,
+      video_poll_url: videoPollUrl(result.id),
+      queue: { status: result.dry_run ? 'completed' : 'submitted', progress: result.dry_run ? 100 : 0 },
     });
   } catch (err: any) {
     markSubmitFailure(req, err);
@@ -2160,16 +2213,18 @@ router.get('/tasks/:id', apiKeyAuth, async (req: Request, res: Response) => {
     if (task.apiKeyId !== (req as any).apiUserId) return res.status(404).json({ error: { message: "Task not found" } });
 
     // Database polling mode - purely return what's in DB
+    const queue = compactQueueInfo(task, task.status === 'SUCCESS' ? 'completed' : task.status === 'FAILED' ? 'failed' : 'processing');
+    const progress = taskProgressPercent(task, task.status === 'SUCCESS' ? 'completed' : task.status === 'FAILED' ? 'failed' : 'queued');
     if (task.status === "SUCCESS") {
-      return res.json({ id: task.id, status: "success", data: [{ url: task.resultUrl }] });
+      return res.json({ id: task.id, status: "success", progress, queue, data: [{ url: task.resultUrl }] });
     }
     if (task.status === "FAILED") {
-      return res.json({ id: task.id, status: "failed", error: task.errorMsg || "Generation failed" });
+      return res.json({ id: task.id, status: "failed", progress, queue, error: task.errorMsg || "Generation failed" });
     }
 
     // If it's PENDING or PROCESSING, just return processing. The daemon handles the CLI.
     // Surface polling warnings without marking the queued Dreamina task as failed.
-    const response: any = { id: task.id, status: "processing" };
+    const response: any = { id: task.id, status: "processing", progress, queue };
     if ((task as any).pollErrorMsg) {
       response.poll_warning = (task as any).pollErrorMsg;
     }

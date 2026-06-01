@@ -894,6 +894,25 @@ const compactSdkValue = (value: any) => {
   return text.length > 72 ? `${text.slice(0, 69)}...` : text;
 };
 
+const sdkQueueSummary = (value: any) => {
+  const queue = value?.queue || value?.metadata?.queue || {};
+  const progress = value?.progress ?? queue.progress ?? value?.metadata?.progress;
+  const parts = [
+    queue.status ? `status: ${queue.status}` : '',
+    queue.index !== undefined && queue.index !== null ? `index: ${queue.index}` : '',
+    queue.length !== undefined && queue.length !== null ? `length: ${queue.length}` : '',
+    queue.wait_seconds !== undefined && queue.wait_seconds !== null ? `wait: ${queue.wait_seconds}s` : '',
+    queue.last_polled_at ? `last poll: ${new Date(queue.last_polled_at).toLocaleString()}` : '',
+  ].filter(Boolean);
+  const stats = [
+    queue.status ? { label: 'Queue', value: compactSdkValue(queue.status) } : null,
+    progress !== undefined && progress !== null ? { label: 'Progress', value: `${progress}%` } : null,
+    queue.index !== undefined && queue.index !== null ? { label: 'Queue position', value: queue.length !== undefined && queue.length !== null ? `${queue.index}/${queue.length}` : queue.index } : null,
+    queue.wait_seconds !== undefined && queue.wait_seconds !== null ? { label: 'Wait', value: `${queue.wait_seconds}s` } : null,
+  ].filter(Boolean) as Array<{ label: string; value: any }>;
+  return { queue, progress, parts, stats };
+};
+
 type SdkSummaryGroup = {
   label: string;
   items: string[];
@@ -998,6 +1017,7 @@ const sdkResponseSummary = (value: any) => {
 
   const taskId = extractTaskIdFromSdkResponse(value);
   if (taskId) {
+    const queue = sdkQueueSummary(value);
     return {
       title: '任务已提交',
       subtitle: pollPathForSdkResponse(value) ? `可继续轮询 ${pollPathForSdkResponse(value)}` : '后端已返回任务标识。',
@@ -1005,9 +1025,11 @@ const sdkResponseSummary = (value: any) => {
         { label: '任务 ID', value: compactSdkValue(taskId) },
         { label: '状态', value: value.status || value.state || '-' },
         { label: 'submit_id', value: compactSdkValue(value.submit_id || value.metadata?.submit_id || '-') },
+        ...queue.stats,
       ],
       groups: [
         { label: '返回字段', items: [value.object, value.task_type, value.metadata?.dreamina_model, value.metadata?.task_type].filter(Boolean).slice(0, 8) },
+        ...(queue.parts.length ? [{ label: 'Queue detail', items: queue.parts }] : []),
       ] as SdkSummaryGroup[],
     };
   }
@@ -1067,6 +1089,8 @@ const extractTaskIdFromSdkResponse = (value: any) => {
 };
 
 const pollPathForSdkResponse = (value: any) => {
+  if (value?.metadata?.poll_url) return value.metadata.poll_url;
+  if (value?.poll_url) return value.poll_url;
   if (!value?.id) return '';
   const id = String(value.id);
   if (id.startsWith('resp_')) return `/v1/responses/${encodeURIComponent(id)}`;

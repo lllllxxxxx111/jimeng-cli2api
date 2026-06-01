@@ -134,6 +134,112 @@ function extractFinalUrl(item, taskType) {
         || uniqueUrls.find(url => image ? /image/i.test(url) : /video/i.test(url))
         || uniqueUrls[0];
 }
+function numberOrNull(value) {
+    if (typeof value === 'number' && Number.isFinite(value))
+        return value;
+    if (typeof value === 'string') {
+        const match = value.match(/-?\d+(?:\.\d+)?/);
+        if (!match)
+            return null;
+        const parsed = Number(match[0]);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+function intOrNull(value) {
+    const parsed = numberOrNull(value);
+    return parsed === null ? null : Math.round(parsed);
+}
+function progressOrNull(value) {
+    const parsed = numberOrNull(value);
+    if (parsed === null)
+        return null;
+    const percent = parsed > 0 && parsed <= 1 ? parsed * 100 : parsed;
+    return Math.max(0, Math.min(100, Math.round(percent)));
+}
+function textOrNull(value) {
+    if (value === undefined || value === null)
+        return null;
+    const text = String(value).trim();
+    return text ? text : null;
+}
+function safeJsonStringify(value, maxLength = 10000) {
+    try {
+        const text = JSON.stringify(value);
+        if (!text)
+            return null;
+        if (text.length <= maxLength)
+            return text;
+        return JSON.stringify({ truncated: true, preview: text.slice(0, maxLength) });
+    }
+    catch {
+        return null;
+    }
+}
+function findDeep(value, keys, seen = new Set(), depth = 0) {
+    if (value === null || value === undefined || depth > 8)
+        return undefined;
+    if (typeof value !== 'object')
+        return undefined;
+    if (seen.has(value))
+        return undefined;
+    seen.add(value);
+    const parsed = parseMaybeJson(value);
+    if (parsed !== value)
+        return findDeep(parsed, keys, seen, depth + 1);
+    if (!Array.isArray(value)) {
+        for (const key of keys) {
+            if (Object.prototype.hasOwnProperty.call(value, key)) {
+                return parseMaybeJson(value[key]);
+            }
+        }
+    }
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) {
+        const found = findDeep(child, keys, seen, depth + 1);
+        if (found !== undefined)
+            return found;
+    }
+    return undefined;
+}
+function extractQueueState(item, rawStatus) {
+    const queueInfo = findDeep(item, ['queue_info', 'queueInfo', 'queue']);
+    const queueSource = queueInfo && typeof queueInfo === 'object' ? queueInfo : {};
+    const queueStatus = textOrNull(queueSource.queue_status
+        ?? queueSource.queueStatus
+        ?? queueSource.status
+        ?? queueSource.state
+        ?? findDeep(item, ['queue_status', 'queueStatus', 'queue_state', 'queueState'])
+        ?? (rawStatus || null));
+    const queueIndex = intOrNull(queueSource.queue_idx
+        ?? queueSource.queueIndex
+        ?? queueSource.queue_index
+        ?? queueSource.index
+        ?? queueSource.position
+        ?? findDeep(item, ['queue_idx', 'queueIndex', 'queue_index', 'queue_position', 'position']));
+    const queueLength = intOrNull(queueSource.queue_length
+        ?? queueSource.queueLength
+        ?? queueSource.queue_size
+        ?? queueSource.length
+        ?? queueSource.total
+        ?? findDeep(item, ['queue_length', 'queueLength', 'queue_size', 'queue_total', 'total']));
+    const queueWaitSeconds = intOrNull(queueSource.wait_seconds
+        ?? queueSource.waitSeconds
+        ?? queueSource.wait_time
+        ?? queueSource.waitTime
+        ?? queueSource.eta
+        ?? findDeep(item, ['wait_seconds', 'waitSeconds', 'wait_time', 'waitTime', 'eta']));
+    const progressPercent = progressOrNull(findDeep(item, ['progress_percent', 'progressPercent', 'percent', 'progress', 'gen_progress']));
+    return {
+        queueStatus,
+        queueIndex,
+        queueLength,
+        queueWaitSeconds,
+        progressPercent,
+        liveStatusRaw: safeJsonStringify(item),
+        lastPolledAt: new Date(),
+    };
+}
 function normalizeTaskState(payload, taskType) {
     const item = Array.isArray(payload) ? payload[0] : payload;
     if (!item || typeof item !== 'object')
@@ -142,7 +248,20 @@ function normalizeTaskState(payload, taskType) {
     const isProcessing = ['pending', 'processing', 'running', 'queueing', 'queued', 'submitted', 'querying'].includes(rawStatus);
     const isFailed = ['failed', 'fail', 'error'].includes(rawStatus) || item.status === 2 || item.task?.status === 2;
     const finalUrl = extractFinalUrl(item, taskType);
-    return { rawStatus, isProcessing, isFailed, finalUrl, item };
+    const queue = extractQueueState(item, rawStatus);
+    return { rawStatus, isProcessing, isFailed, finalUrl, item, ...queue };
+}
+function taskStateData(state, overrides = {}) {
+    return {
+        queueStatus: state.queueStatus,
+        queueIndex: state.queueIndex,
+        queueLength: state.queueLength,
+        queueWaitSeconds: state.queueWaitSeconds,
+        progressPercent: state.progressPercent,
+        liveStatusRaw: state.liveStatusRaw,
+        lastPolledAt: state.lastPolledAt,
+        ...overrides,
+    };
 }
 exports.pollingDaemon = {
     start() {
@@ -171,7 +290,14 @@ exports.pollingDaemon = {
                     console.warn(`[Daemon] Task ${t.id} timed out (>24h). Marking FAILED.`);
                     await prisma.task.update({
                         where: { id: t.id },
-                        data: { status: 'FAILED', errorMsg: '任务超过24小时未完成，已自动标记为失败。', pollErrorMsg: null }
+                        data: {
+                            status: 'FAILED',
+                            errorMsg: '任务超过24小时未完成，已自动标记为失败。',
+                            pollErrorMsg: null,
+                            queueStatus: 'timeout',
+                            progressPercent: null,
+                            lastPolledAt: new Date(),
+                        }
                     });
                 }
                 const tasks = await prisma.task.findMany({
@@ -227,6 +353,7 @@ exports.pollingDaemon = {
                                     await prisma.task.update({
                                         where: { id: task.id },
                                         data: {
+                                            lastPolledAt: new Date(),
                                             pollErrorMsg: `[${new Date().toISOString()}] 我方网络异常，轮询暂时中断，任务仍在火山排队。错误: ${errMsg.substring(0, 200)}`
                                         }
                                     });
@@ -246,7 +373,10 @@ exports.pollingDaemon = {
                                 console.warn(`[Daemon] Cannot parse response for task ${task.id}. Raw: ${stdout.substring(0, 200)}`);
                                 await prisma.task.update({
                                     where: { id: task.id },
-                                    data: { pollErrorMsg: `[${new Date().toISOString()}] 响应解析失败，将自动重试。Raw: ${stdout.substring(0, 200)}` }
+                                    data: {
+                                        lastPolledAt: new Date(),
+                                        pollErrorMsg: `[${new Date().toISOString()}] 响应解析失败，将自动重试。Raw: ${stdout.substring(0, 200)}`
+                                    }
                                 });
                                 return;
                             }
@@ -256,7 +386,13 @@ exports.pollingDaemon = {
                                 console.log(`[Daemon] Task ${task.id} SUCCESS. URL: ${state.finalUrl}`);
                                 await prisma.task.update({
                                     where: { id: task.id },
-                                    data: { status: 'SUCCESS', resultUrl: state.finalUrl, pollErrorMsg: null }
+                                    data: taskStateData(state, {
+                                        status: 'SUCCESS',
+                                        resultUrl: state.finalUrl,
+                                        pollErrorMsg: null,
+                                        queueStatus: state.queueStatus || 'completed',
+                                        progressPercent: 100,
+                                    })
                                 });
                             }
                             else if (state.isFailed) {
@@ -265,27 +401,40 @@ exports.pollingDaemon = {
                                 console.log(`[Daemon] Task ${task.id} FAILED by Volcengine. rawStatus=${state.rawStatus}, reason=${failReason}`);
                                 await prisma.task.update({
                                     where: { id: task.id },
-                                    data: {
+                                    data: taskStateData(state, {
                                         status: 'FAILED',
                                         errorMsg: failReason || `火山服务返回失败。状态: ${state.rawStatus}. 原始: ${stdout.substring(0, 200)}`,
-                                        pollErrorMsg: null
-                                    }
+                                        pollErrorMsg: null,
+                                        queueStatus: state.queueStatus || 'failed',
+                                    })
                                 });
                             }
                             else if (state.isProcessing) {
                                 // 火山明确：还在处理，继续等
-                                console.log(`[Daemon] Task ${task.id} still processing on Volcengine (rawStatus=${state.rawStatus}).`);
-                                // 如果之前有 pollErrorMsg（网络恢复了），清掉它
-                                if (task.pollErrorMsg) {
-                                    await prisma.task.update({ where: { id: task.id }, data: { pollErrorMsg: null } });
-                                }
+                                const queueLog = [
+                                    state.queueStatus ? `queueStatus=${state.queueStatus}` : '',
+                                    state.queueIndex !== null && state.queueIndex !== undefined ? `queueIndex=${state.queueIndex}` : '',
+                                    state.queueLength !== null && state.queueLength !== undefined ? `queueLength=${state.queueLength}` : '',
+                                    state.progressPercent !== null && state.progressPercent !== undefined ? `progress=${state.progressPercent}%` : '',
+                                ].filter(Boolean).join(', ');
+                                console.log(`[Daemon] Task ${task.id} still processing on Volcengine (rawStatus=${state.rawStatus}${queueLog ? `, ${queueLog}` : ''}).`);
+                                await prisma.task.update({
+                                    where: { id: task.id },
+                                    data: taskStateData(state, {
+                                        pollErrorMsg: null,
+                                        queueStatus: state.queueStatus || state.rawStatus || 'processing',
+                                    })
+                                });
                             }
                             else {
                                 // 状态未知但 CLI 正常返回 → 保守处理，继续等
                                 console.warn(`[Daemon] Task ${task.id} unknown rawStatus="${state.rawStatus}", keeping PROCESSING.`);
                                 await prisma.task.update({
                                     where: { id: task.id },
-                                    data: { pollErrorMsg: `[${new Date().toISOString()}] 未知状态"${state.rawStatus}"，保持等待。` }
+                                    data: taskStateData(state, {
+                                        pollErrorMsg: `[${new Date().toISOString()}] 未知状态"${state.rawStatus}"，保持等待。`,
+                                        queueStatus: state.queueStatus || state.rawStatus || 'unknown',
+                                    })
                                 });
                             }
                         }); // end runWithConcurrency(accountTasks)

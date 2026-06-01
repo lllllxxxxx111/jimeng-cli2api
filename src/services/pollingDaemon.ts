@@ -143,6 +143,121 @@ function extractFinalUrl(item: any, taskType: string): string | null {
     || uniqueUrls[0];
 }
 
+function numberOrNull(value: any): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const match = value.match(/-?\d+(?:\.\d+)?/);
+    if (!match) return null;
+    const parsed = Number(match[0]);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function intOrNull(value: any): number | null {
+  const parsed = numberOrNull(value);
+  return parsed === null ? null : Math.round(parsed);
+}
+
+function progressOrNull(value: any): number | null {
+  const parsed = numberOrNull(value);
+  if (parsed === null) return null;
+  const percent = parsed > 0 && parsed <= 1 ? parsed * 100 : parsed;
+  return Math.max(0, Math.min(100, Math.round(percent)));
+}
+
+function textOrNull(value: any): string | null {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text ? text : null;
+}
+
+function safeJsonStringify(value: any, maxLength = 10000): string | null {
+  try {
+    const text = JSON.stringify(value);
+    if (!text) return null;
+    if (text.length <= maxLength) return text;
+    return JSON.stringify({ truncated: true, preview: text.slice(0, maxLength) });
+  } catch {
+    return null;
+  }
+}
+
+function findDeep(value: any, keys: string[], seen = new Set<any>(), depth = 0): any {
+  if (value === null || value === undefined || depth > 8) return undefined;
+  if (typeof value !== 'object') return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  const parsed = parseMaybeJson(value);
+  if (parsed !== value) return findDeep(parsed, keys, seen, depth + 1);
+
+  if (!Array.isArray(value)) {
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        return parseMaybeJson(value[key]);
+      }
+    }
+  }
+
+  const children = Array.isArray(value) ? value : Object.values(value);
+  for (const child of children) {
+    const found = findDeep(child, keys, seen, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function extractQueueState(item: any, rawStatus: string) {
+  const queueInfo = findDeep(item, ['queue_info', 'queueInfo', 'queue']);
+  const queueSource = queueInfo && typeof queueInfo === 'object' ? queueInfo : {};
+  const queueStatus = textOrNull(
+    (queueSource as any).queue_status
+      ?? (queueSource as any).queueStatus
+      ?? (queueSource as any).status
+      ?? (queueSource as any).state
+      ?? findDeep(item, ['queue_status', 'queueStatus', 'queue_state', 'queueState'])
+      ?? (rawStatus || null)
+  );
+  const queueIndex = intOrNull(
+    (queueSource as any).queue_idx
+      ?? (queueSource as any).queueIndex
+      ?? (queueSource as any).queue_index
+      ?? (queueSource as any).index
+      ?? (queueSource as any).position
+      ?? findDeep(item, ['queue_idx', 'queueIndex', 'queue_index', 'queue_position', 'position'])
+  );
+  const queueLength = intOrNull(
+    (queueSource as any).queue_length
+      ?? (queueSource as any).queueLength
+      ?? (queueSource as any).queue_size
+      ?? (queueSource as any).length
+      ?? (queueSource as any).total
+      ?? findDeep(item, ['queue_length', 'queueLength', 'queue_size', 'queue_total', 'total'])
+  );
+  const queueWaitSeconds = intOrNull(
+    (queueSource as any).wait_seconds
+      ?? (queueSource as any).waitSeconds
+      ?? (queueSource as any).wait_time
+      ?? (queueSource as any).waitTime
+      ?? (queueSource as any).eta
+      ?? findDeep(item, ['wait_seconds', 'waitSeconds', 'wait_time', 'waitTime', 'eta'])
+  );
+  const progressPercent = progressOrNull(
+    findDeep(item, ['progress_percent', 'progressPercent', 'percent', 'progress', 'gen_progress'])
+  );
+
+  return {
+    queueStatus,
+    queueIndex,
+    queueLength,
+    queueWaitSeconds,
+    progressPercent,
+    liveStatusRaw: safeJsonStringify(item),
+    lastPolledAt: new Date(),
+  };
+}
+
 function normalizeTaskState(payload: any, taskType: string) {
   const item = Array.isArray(payload) ? payload[0] : payload;
   if (!item || typeof item !== 'object') return null;
@@ -152,8 +267,22 @@ function normalizeTaskState(payload: any, taskType: string) {
   const isFailed = ['failed', 'fail', 'error'].includes(rawStatus) || item.status === 2 || item.task?.status === 2;
 
   const finalUrl = extractFinalUrl(item, taskType);
+  const queue = extractQueueState(item, rawStatus);
 
-  return { rawStatus, isProcessing, isFailed, finalUrl, item };
+  return { rawStatus, isProcessing, isFailed, finalUrl, item, ...queue };
+}
+
+function taskStateData(state: any, overrides: Record<string, any> = {}) {
+  return {
+    queueStatus: state.queueStatus,
+    queueIndex: state.queueIndex,
+    queueLength: state.queueLength,
+    queueWaitSeconds: state.queueWaitSeconds,
+    progressPercent: state.progressPercent,
+    liveStatusRaw: state.liveStatusRaw,
+    lastPolledAt: state.lastPolledAt,
+    ...overrides,
+  };
 }
 
 export const pollingDaemon = {
@@ -183,7 +312,14 @@ export const pollingDaemon = {
           console.warn(`[Daemon] Task ${t.id} timed out (>24h). Marking FAILED.`);
           await prisma.task.update({
             where: { id: t.id },
-            data: { status: 'FAILED', errorMsg: '任务超过24小时未完成，已自动标记为失败。', pollErrorMsg: null }
+            data: {
+              status: 'FAILED',
+              errorMsg: '任务超过24小时未完成，已自动标记为失败。',
+              pollErrorMsg: null,
+              queueStatus: 'timeout',
+              progressPercent: null,
+              lastPolledAt: new Date(),
+            }
           });
         }
 
@@ -245,6 +381,7 @@ export const pollingDaemon = {
                   await prisma.task.update({
                     where: { id: task.id },
                     data: {
+                      lastPolledAt: new Date(),
                       pollErrorMsg: `[${new Date().toISOString()}] 我方网络异常，轮询暂时中断，任务仍在火山排队。错误: ${errMsg.substring(0, 200)}`
                     }
                   });
@@ -267,7 +404,10 @@ export const pollingDaemon = {
               console.warn(`[Daemon] Cannot parse response for task ${task.id}. Raw: ${stdout.substring(0, 200)}`);
               await prisma.task.update({
                 where: { id: task.id },
-                data: { pollErrorMsg: `[${new Date().toISOString()}] 响应解析失败，将自动重试。Raw: ${stdout.substring(0, 200)}` }
+                data: {
+                  lastPolledAt: new Date(),
+                  pollErrorMsg: `[${new Date().toISOString()}] 响应解析失败，将自动重试。Raw: ${stdout.substring(0, 200)}`
+                }
               });
               return;
             }
@@ -278,7 +418,13 @@ export const pollingDaemon = {
               console.log(`[Daemon] Task ${task.id} SUCCESS. URL: ${state.finalUrl}`);
               await prisma.task.update({
                 where: { id: task.id },
-                data: { status: 'SUCCESS', resultUrl: state.finalUrl, pollErrorMsg: null }
+                data: taskStateData(state, {
+                  status: 'SUCCESS',
+                  resultUrl: state.finalUrl,
+                  pollErrorMsg: null,
+                  queueStatus: state.queueStatus || 'completed',
+                  progressPercent: 100,
+                })
               });
             } else if (state.isFailed) {
               // 火山明确：失败（gen_status = failed/fail/error，或 status=2）
@@ -286,25 +432,38 @@ export const pollingDaemon = {
               console.log(`[Daemon] Task ${task.id} FAILED by Volcengine. rawStatus=${state.rawStatus}, reason=${failReason}`);
               await prisma.task.update({
                 where: { id: task.id },
-                data: {
+                data: taskStateData(state, {
                   status: 'FAILED',
                   errorMsg: failReason || `火山服务返回失败。状态: ${state.rawStatus}. 原始: ${stdout.substring(0, 200)}`,
-                  pollErrorMsg: null
-                }
+                  pollErrorMsg: null,
+                  queueStatus: state.queueStatus || 'failed',
+                })
               });
             } else if (state.isProcessing) {
               // 火山明确：还在处理，继续等
-              console.log(`[Daemon] Task ${task.id} still processing on Volcengine (rawStatus=${state.rawStatus}).`);
-              // 如果之前有 pollErrorMsg（网络恢复了），清掉它
-              if ((task as any).pollErrorMsg) {
-                await prisma.task.update({ where: { id: task.id }, data: { pollErrorMsg: null } });
-              }
+              const queueLog = [
+                state.queueStatus ? `queueStatus=${state.queueStatus}` : '',
+                state.queueIndex !== null && state.queueIndex !== undefined ? `queueIndex=${state.queueIndex}` : '',
+                state.queueLength !== null && state.queueLength !== undefined ? `queueLength=${state.queueLength}` : '',
+                state.progressPercent !== null && state.progressPercent !== undefined ? `progress=${state.progressPercent}%` : '',
+              ].filter(Boolean).join(', ');
+              console.log(`[Daemon] Task ${task.id} still processing on Volcengine (rawStatus=${state.rawStatus}${queueLog ? `, ${queueLog}` : ''}).`);
+              await prisma.task.update({
+                where: { id: task.id },
+                data: taskStateData(state, {
+                  pollErrorMsg: null,
+                  queueStatus: state.queueStatus || state.rawStatus || 'processing',
+                })
+              });
             } else {
               // 状态未知但 CLI 正常返回 → 保守处理，继续等
               console.warn(`[Daemon] Task ${task.id} unknown rawStatus="${state.rawStatus}", keeping PROCESSING.`);
               await prisma.task.update({
                 where: { id: task.id },
-                data: { pollErrorMsg: `[${new Date().toISOString()}] 未知状态"${state.rawStatus}"，保持等待。` }
+                data: taskStateData(state, {
+                  pollErrorMsg: `[${new Date().toISOString()}] 未知状态"${state.rawStatus}"，保持等待。`,
+                  queueStatus: state.queueStatus || state.rawStatus || 'unknown',
+                })
               });
             }
           });  // end runWithConcurrency(accountTasks)

@@ -51,6 +51,13 @@ model Task {
   resultUrl      String?
   errorMsg       String?
   pollErrorMsg   String?
+  queueStatus    String?
+  queueIndex     Int?
+  queueLength    Int?
+  queueWaitSeconds Int?
+  progressPercent Int?
+  liveStatusRaw  String?
+  lastPolledAt   DateTime?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
