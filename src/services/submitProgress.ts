@@ -7,6 +7,9 @@ export type SubmitProgressPhase =
   | 'account_ready'
   | 'creating_task'
   | 'task_created'
+  | 'waiting_cli_slot'
+  | 'cli_slot_acquired'
+  | 'credentials_ready'
   | 'cli_cold_start'
   | 'starting_cli'
   | 'waiting_submit_id'
@@ -30,6 +33,8 @@ export type SubmitProgressSnapshot = {
   command?: string;
   detail?: string;
   error?: string;
+  errorType?: string;
+  errorCode?: string;
   done: boolean;
 };
 

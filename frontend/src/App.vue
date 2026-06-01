@@ -957,10 +957,15 @@ const sdkResponseSummary = (value: any) => {
   const errorMessage = value.error?.message || (typeof value.error === 'string' ? value.error : '');
   if (errorMessage) {
     const friendlyMessage = friendlySdkError(errorMessage);
+    const errorType = value.error?.type ? sdkErrorTypeLabel(value.error.type) : '';
     return {
       title: '请求失败',
       subtitle: friendlyMessage,
-      stats: [{ label: '错误', value: compactSdkValue(friendlyMessage) }],
+      stats: [
+        { label: '错误', value: compactSdkValue(friendlyMessage) },
+        ...(errorType ? [{ label: '归因', value: errorType }] : []),
+        ...(value.error?.code ? [{ label: '代码', value: String(value.error.code) }] : []),
+      ],
       groups: [] as SdkSummaryGroup[],
     };
   }
@@ -1107,6 +1112,9 @@ const sdkProgressLabel = (phase: string) => ({
   account_ready: '账号已锁定',
   creating_task: '创建任务记录',
   task_created: '任务记录已创建',
+  waiting_cli_slot: '等待 CLI 执行槽',
+  cli_slot_acquired: 'CLI 执行槽已获得',
+  credentials_ready: '登录态已换入',
   cli_cold_start: 'CLI 冷启动',
   starting_cli: '启动 CLI 进程',
   waiting_submit_id: '等待即梦 submit_id',
@@ -1129,6 +1137,9 @@ const sdkProgressDetailLabel = () => {
     account_ready: '账号已锁定，接下来创建任务记录。',
     creating_task: '正在写入任务记录和扣减本地 Key 用量。',
     task_created: '任务记录已创建，准备启动 dreamina CLI。',
+    waiting_cli_slot: '正在等待 Windows 凭据锁，避免多个账号的登录态互相覆盖。',
+    cli_slot_acquired: '已经获得 CLI 执行槽，可以安全切换当前账号登录态。',
+    credentials_ready: '当前账号的 credential/token 已换入，准备启动 CLI。',
     cli_cold_start: '这是服务启动后的第一次 CLI 提交，正在冷启动 dreamina CLI。',
     starting_cli: '正在启动 dreamina CLI 进程。',
     waiting_submit_id: 'CLI 进程运行中，正在等待即梦返回 submit_id / log_id。',
@@ -1139,6 +1150,18 @@ const sdkProgressDetailLabel = () => {
   };
   return details[phase] || progress.detail || '';
 };
+
+const sdkErrorTypeLabel = (type: string) => ({
+  auth_error: '鉴权失败',
+  quota_error: '本地额度不足',
+  account_unavailable: '账号不可用',
+  parameter_error: '参数错误',
+  account_permission_error: '账号权限不足',
+  submit_parse_error: 'submit_id 解析失败',
+  network_error: '网络/代理错误',
+  cli_error: 'CLI 执行失败',
+  unknown_error: '未知错误',
+}[type] || type || '');
 
 const sdkProgressElapsedLabel = () => {
   const ms = Number(sdkSubmitProgress.value?.elapsedMs ?? sdkSubmitElapsedMs.value ?? 0);
@@ -3058,6 +3081,7 @@ onMounted(() => {
                     <p v-if="sdkSubmitProgress?.taskId" class="break-all">任务：{{ sdkSubmitProgress.taskId }}</p>
                     <p v-if="sdkSubmitProgress?.submitId" class="break-all">submit_id：{{ sdkSubmitProgress.submitId }}</p>
                   </div>
+                  <p v-if="sdkSubmitProgress?.errorType" class="text-red-100 mt-2">归因：{{ sdkErrorTypeLabel(sdkSubmitProgress.errorType) }}<span v-if="sdkSubmitProgress?.errorCode" class="font-mono"> / {{ sdkSubmitProgress.errorCode }}</span></p>
                   <p v-if="sdkSubmitProgress?.error" class="text-red-200 mt-2 break-words">{{ sdkSubmitProgress.error }}</p>
                 </div>
                 <div v-if="extractTaskIdFromSdkResponse(sdkResponse)" class="mt-2 bg-white/10 p-3 rounded-lg text-xs min-w-0">

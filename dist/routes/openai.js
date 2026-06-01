@@ -934,6 +934,47 @@ const httpError = (statusCode, message) => {
     return error;
 };
 const getHttpStatus = (error) => error?.statusCode || error?.status || 500;
+const classifySubmitError = (message, statusCode = 500) => {
+    const text = String(message || '');
+    const lower = text.toLowerCase();
+    if (statusCode === 401 || lower.includes('authorization') || lower.includes('invalid api key')) {
+        return { type: 'auth_error', code: 'invalid_api_key' };
+    }
+    if (statusCode === 429 || lower.includes('quota')) {
+        return { type: 'quota_error', code: 'quota_exceeded' };
+    }
+    if (lower.includes('busy') || lower.includes('out of credits')) {
+        return { type: 'account_unavailable', code: 'account_busy_or_no_credit' };
+    }
+    if (/resolution_type|video_resolution|ratio|duration|must be|must contain|required|not supported|valid json|validation failed/i.test(text)) {
+        return { type: 'parameter_error', code: 'invalid_request' };
+    }
+    if (/vip|member|会员/i.test(text)) {
+        return { type: 'account_permission_error', code: 'vip_required' };
+    }
+    if (lower.includes('cannot find submit_id') || lower.includes('submit_id')) {
+        return { type: 'submit_parse_error', code: 'submit_id_missing' };
+    }
+    if (/network|timeout|timed out|econn|socket|fetch failed|proxy/i.test(text)) {
+        return { type: 'network_error', code: 'network_failed' };
+    }
+    if (/cli|dreamina|spawn|enoent|stderr|stdout/i.test(text)) {
+        return { type: 'cli_error', code: 'cli_failed' };
+    }
+    return { type: 'unknown_error', code: 'submit_failed' };
+};
+const openAiErrorBody = (error) => {
+    const message = error?.message || String(error || 'Unknown error');
+    const statusCode = getHttpStatus(error);
+    const category = classifySubmitError(message, statusCode);
+    return {
+        error: {
+            message,
+            type: category.type,
+            code: category.code,
+        },
+    };
+};
 const getSubmitTraceId = (req) => {
     return (0, submitProgress_1.normalizeSubmitProgressId)(req.headers['x-jimeng-submit-trace']);
 };
@@ -945,6 +986,15 @@ const markSubmitProgress = (req, phase, patch = {}) => {
         method: req.method,
         path: req.originalUrl || req.path,
         ...patch,
+    });
+};
+const markSubmitFailure = (req, error) => {
+    const message = error?.message || String(error || 'Unknown error');
+    const category = classifySubmitError(message, getHttpStatus(error));
+    markSubmitProgress(req, 'failed', {
+        error: message,
+        errorType: category.type,
+        errorCode: category.code,
     });
 };
 const getNoVipStatus = (message) => {
@@ -1295,7 +1345,7 @@ const dispatchQueuedTask = async (req, options) => {
         markSubmitProgress(req, 'waiting_account', { detail: 'selecting an idle Dreamina account' });
         account = await accountService_1.accountService.getIdleAccount(req.apiBoundAccountId);
         if (!account) {
-            markSubmitProgress(req, 'failed', { error: 'All Dreamina accounts are busy or out of credits.' });
+            markSubmitFailure(req, httpError(503, 'All Dreamina accounts are busy or out of credits.'));
             throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
         }
         markSubmitProgress(req, 'account_ready', {
@@ -1337,14 +1387,24 @@ const dispatchQueuedTask = async (req, options) => {
         try {
             const isColdStart = cliSubmitCommandCount === 0;
             cliSubmitCommandCount += 1;
-            markSubmitProgress(req, isColdStart ? 'cli_cold_start' : 'starting_cli', {
+            markSubmitProgress(req, 'waiting_cli_slot', {
                 taskId: dbTask.id,
                 command: options.command,
-                detail: isColdStart ? 'first CLI submit command since this server started' : 'starting a Dreamina CLI process',
+                detail: 'waiting for the Windows credential/CLI execution slot',
             });
             const traceId = getSubmitTraceId(req);
-            const waitingTimer = traceId
-                ? setTimeout(() => {
+            let waitingTimer = null;
+            const clearWaitingTimer = () => {
+                if (waitingTimer) {
+                    clearTimeout(waitingTimer);
+                    waitingTimer = null;
+                }
+            };
+            const startWaitingTimer = () => {
+                clearWaitingTimer();
+                if (!traceId)
+                    return;
+                waitingTimer = setTimeout(() => {
                     const snapshot = (0, submitProgress_1.getSubmitProgress)(traceId);
                     if (snapshot && !snapshot.done && (snapshot.phase === 'cli_cold_start' || snapshot.phase === 'starting_cli')) {
                         (0, submitProgress_1.updateSubmitProgress)(traceId, 'waiting_submit_id', {
@@ -1353,11 +1413,43 @@ const dispatchQueuedTask = async (req, options) => {
                             detail: 'CLI process is running; waiting for Dreamina submit_id/log_id',
                         });
                     }
-                }, 1200)
-                : null;
-            const { stdout } = await (0, cliRunner_1.runJimengCommand)(options.command, account.homeDir);
-            if (waitingTimer)
-                clearTimeout(waitingTimer);
+                }, 1200);
+            };
+            const { stdout } = await (0, cliRunner_1.runJimengCommand)(options.command, account.homeDir, false, 1000 * 60 * 5, (phase) => {
+                if (phase === 'waiting_credential_slot') {
+                    markSubmitProgress(req, 'waiting_cli_slot', {
+                        taskId: dbTask.id,
+                        command: options.command,
+                        detail: 'waiting for the Windows credential/CLI execution slot',
+                    });
+                }
+                else if (phase === 'credential_slot_acquired') {
+                    markSubmitProgress(req, 'cli_slot_acquired', {
+                        taskId: dbTask.id,
+                        command: options.command,
+                        detail: 'credential/CLI execution slot acquired',
+                    });
+                }
+                else if (phase === 'credential_ready') {
+                    markSubmitProgress(req, 'credentials_ready', {
+                        taskId: dbTask.id,
+                        command: options.command,
+                        detail: 'Dreamina credential and registry token are ready',
+                    });
+                }
+                else if (phase === 'process_started') {
+                    markSubmitProgress(req, isColdStart ? 'cli_cold_start' : 'starting_cli', {
+                        taskId: dbTask.id,
+                        command: options.command,
+                        detail: isColdStart ? 'first CLI submit command since this server started' : 'Dreamina CLI process started',
+                    });
+                    startWaitingTimer();
+                }
+                else if (phase === 'process_finished') {
+                    clearWaitingTimer();
+                }
+            });
+            clearWaitingTimer();
             markSubmitProgress(req, 'parsing_submit_id', {
                 taskId: dbTask.id,
                 detail: 'CLI finished; parsing submit_id/log_id from stdout',
@@ -1387,16 +1479,19 @@ const dispatchQueuedTask = async (req, options) => {
                 data: { status: 'FAILED', errorMsg: cmdErr.message },
             });
             await accountService_1.accountService.releaseAccount(account.id, getNoVipStatus(cmdErr.message || ''));
+            const category = classifySubmitError(cmdErr.message || '', 500);
             markSubmitProgress(req, 'failed', {
                 taskId: dbTask.id,
                 error: cmdErr.message,
+                errorType: category.type,
+                errorCode: category.code,
                 detail: 'Dreamina CLI submit failed',
             });
             throw httpError(500, 'Jimeng CLI failed: ' + cmdErr.message);
         }
     }
     catch (error) {
-        markSubmitProgress(req, 'failed', { error: error.message || String(error) });
+        markSubmitFailure(req, error);
         if (account && getHttpStatus(error) !== 500) {
             try {
                 await accountService_1.accountService.releaseAccount(account.id, 'IDLE');
@@ -1749,14 +1844,16 @@ const apiKeyAuth = async (req, res, next) => {
     markSubmitProgress(req, 'checking_key', { detail: 'checking OpenAI-compatible API key' });
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        markSubmitProgress(req, 'failed', { error: 'Missing Authorization header' });
-        return res.status(401).json({ error: { message: 'Missing Authorization header' } });
+        const error = httpError(401, 'Missing Authorization header');
+        markSubmitFailure(req, error);
+        return res.status(401).json(openAiErrorBody(error));
     }
     const token = authHeader.split(' ')[1];
     const apiKey = await prisma.apiKey.findUnique({ where: { key: token, isActive: true } });
     if (!apiKey) {
-        markSubmitProgress(req, 'failed', { error: 'Invalid API Key' });
-        return res.status(401).json({ error: { message: 'Invalid API Key' } });
+        const error = httpError(401, 'Invalid API Key');
+        markSubmitFailure(req, error);
+        return res.status(401).json(openAiErrorBody(error));
     }
     req.apiUserId = apiKey.id;
     req.apiBoundAccountId = apiKey.boundAccountId ?? null;
@@ -1826,8 +1923,8 @@ router.post('/responses', apiKeyAuth, responsesUpload.any(), async (req, res) =>
         return res.json(buildResponseObjectFromDispatch(result));
     }
     catch (error) {
-        markSubmitProgress(req, 'failed', { error: error.message || String(error) });
-        return res.status(getHttpStatus(error)).json({ error: { message: error.message } });
+        markSubmitFailure(req, error);
+        return res.status(getHttpStatus(error)).json(openAiErrorBody(error));
     }
 });
 router.get('/responses/:id', apiKeyAuth, async (req, res) => {
@@ -1856,8 +1953,8 @@ router.post('/videos', apiKeyAuth, upload.any(), async (req, res) => {
         return res.json(buildOpenAIVideoObjectFromDispatch(result));
     }
     catch (err) {
-        markSubmitProgress(req, 'failed', { error: err.message || String(err) });
-        return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+        markSubmitFailure(req, err);
+        return res.status(getHttpStatus(err)).json(openAiErrorBody(err));
     }
 });
 router.get('/videos/:id', apiKeyAuth, async (req, res) => {
@@ -1868,7 +1965,7 @@ router.get('/videos/:id', apiKeyAuth, async (req, res) => {
         return res.json(buildOpenAIVideoObject(task));
     }
     catch (err) {
-        return res.status(500).json({ error: { message: err.message } });
+        return res.status(500).json(openAiErrorBody(err));
     }
 });
 router.get('/videos/:id/content', apiKeyAuth, async (req, res) => {
@@ -1901,8 +1998,8 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
         });
     }
     catch (err) {
-        markSubmitProgress(req, 'failed', { error: err.message || String(err) });
-        return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+        markSubmitFailure(req, err);
+        return res.status(getHttpStatus(err)).json(openAiErrorBody(err));
     }
 });
 router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req, res) => {
@@ -1920,8 +2017,8 @@ router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req, r
         });
     }
     catch (err) {
-        markSubmitProgress(req, 'failed', { error: err.message || String(err) });
-        return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+        markSubmitFailure(req, err);
+        return res.status(getHttpStatus(err)).json(openAiErrorBody(err));
     }
 });
 router.post('/videos/generations', apiKeyAuth, upload.any(), async (req, res) => {
@@ -1940,8 +2037,8 @@ router.post('/videos/generations', apiKeyAuth, upload.any(), async (req, res) =>
         });
     }
     catch (err) {
-        markSubmitProgress(req, 'failed', { error: err.message || String(err) });
-        return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
+        markSubmitFailure(req, err);
+        return res.status(getHttpStatus(err)).json(openAiErrorBody(err));
     }
 });
 router.get('/tasks/:id', apiKeyAuth, async (req, res) => {

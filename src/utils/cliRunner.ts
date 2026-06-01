@@ -107,6 +107,13 @@ export interface CliRunResult {
   stderr: string;
 }
 
+export type CliRunPhase =
+  | 'waiting_credential_slot'
+  | 'credential_slot_acquired'
+  | 'credential_ready'
+  | 'process_started'
+  | 'process_finished';
+
 /**
  * 解析 dreamina 可执行文件路径：
  * 优先使用项目内 bin/ 目录（便于部署），找不到再 fallback 到系统 PATH 中的全局命令。
@@ -215,17 +222,24 @@ let _mutexTail: Promise<void> = Promise.resolve();
 export async function withCredSwap<T>(
   accountHomeDir: string,
   fn: () => Promise<T>,
-  tokenMode: 'restore' | 'clear' | 'none' = 'restore'
+  tokenMode: 'restore' | 'clear' | 'none' = 'restore',
+  onPhase?: (phase: CliRunPhase) => void
 ): Promise<T> {
   // Unix: HOME 隔离，直接执行，无需 mutex 或 token swap
-  if (!IS_WINDOWS) return fn();
+  if (!IS_WINDOWS) {
+    onPhase?.('credential_slot_acquired');
+    onPhase?.('credential_ready');
+    return fn();
+  }
 
   let release!: () => void;
   const hold = new Promise<void>(r => { release = r; });
   const prev = _mutexTail;
   _mutexTail = hold;
+  onPhase?.('waiting_credential_slot');
   await prev;
   try {
+    onPhase?.('credential_slot_acquired');
     // 1. 把该账号的 credential.json 换入真实 home
     const accountCred = path.join(path.resolve(accountHomeDir), CRED_RELATIVE);
     const realCred = path.join(REAL_HOME, CRED_RELATIVE);
@@ -240,6 +254,7 @@ export async function withCredSwap<T>(
     } else if (tokenMode === 'clear') {
       await clearRegToken();
     }
+    onPhase?.('credential_ready');
     return await fn();
   } finally {
     release();
@@ -323,12 +338,13 @@ export const runJimengCommand = async (
   command: string,
   accountHomeDir?: string,
   saveBackup: boolean = false,
-  timeoutMs: number = 1000 * 60 * 5
+  timeoutMs: number = 1000 * 60 * 5,
+  onPhase?: (phase: CliRunPhase) => void
 ): Promise<CliRunResult> => {
   const resolvedCommand = resolveDreaminaCommand(command);
 
   const env: NodeJS.ProcessEnv = { ...process.env };
-  
+
   if (accountHomeDir) {
     const absoluteHome = path.resolve(accountHomeDir);
     env.HOME = absoluteHome;
@@ -339,6 +355,7 @@ export const runJimengCommand = async (
 
   const runFn = async (): Promise<CliRunResult> => {
     try {
+      onPhase?.('process_started');
       const { stdout, stderr } = await execFileAsync(resolvedCommand.file, resolvedCommand.args, {
         env,
         timeout: timeoutMs,
@@ -351,16 +368,24 @@ export const runJimengCommand = async (
         await saveRegToken(accountHomeDir); // 保存注册表 token 到账号隔离目录
       }
       return { stdout, stderr };
-    } catch (error: any) {
-      throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+    } finally {
+      onPhase?.('process_finished');
     }
   };
 
   // 有 accountHomeDir 时，先换入该账号的 credential 再执行
   if (accountHomeDir) {
-    return withCredSwap(accountHomeDir, runFn);
+    try {
+      return await withCredSwap(accountHomeDir, runFn, 'restore', onPhase);
+    } catch (error: any) {
+      throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+    }
   }
-  return runFn();
+  try {
+    return await runFn();
+  } catch (error: any) {
+    throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+  }
 };
 
 /**

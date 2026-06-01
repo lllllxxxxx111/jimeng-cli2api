@@ -1,4 +1,4 @@
-export type SubmitProgressPhase = 'received' | 'checking_key' | 'key_checked' | 'preparing_request' | 'waiting_account' | 'account_ready' | 'creating_task' | 'task_created' | 'cli_cold_start' | 'starting_cli' | 'waiting_submit_id' | 'parsing_submit_id' | 'queued' | 'dry_run' | 'failed';
+export type SubmitProgressPhase = 'received' | 'checking_key' | 'key_checked' | 'preparing_request' | 'waiting_account' | 'account_ready' | 'creating_task' | 'task_created' | 'waiting_cli_slot' | 'cli_slot_acquired' | 'credentials_ready' | 'cli_cold_start' | 'starting_cli' | 'waiting_submit_id' | 'parsing_submit_id' | 'queued' | 'dry_run' | 'failed';
 export type SubmitProgressSnapshot = {
     id: string;
     phase: SubmitProgressPhase;
@@ -14,6 +14,8 @@ export type SubmitProgressSnapshot = {
     command?: string;
     detail?: string;
     error?: string;
+    errorType?: string;
+    errorCode?: string;
     done: boolean;
 };
 export declare const normalizeSubmitProgressId: (value: unknown) => string;

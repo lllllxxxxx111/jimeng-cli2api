@@ -1,1 +1,1 @@
-{"version":3,"file":"openai.d.ts","sourceRoot":"","sources":["../../src/routes/openai.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;GAWG;AAeH,QAAA,MAAM,MAAM,4CAAW,CAAC;AA4gExB,eAAe,MAAM,CAAC"}
+{"version":3,"file":"openai.d.ts","sourceRoot":"","sources":["../../src/routes/openai.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;GAWG;AAeH,QAAA,MAAM,MAAM,4CAAW,CAAC;AA4mExB,eAAe,MAAM,CAAC"}

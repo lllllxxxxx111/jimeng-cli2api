@@ -203,16 +203,21 @@ let _mutexTail = Promise.resolve();
  * Unix 上 token 天然隔离（go-keyring fallback 跟随 HOME），无需 mutex 和 token 操作。
  * Windows 上 token 存于固定注册表键（HKCU），必须串行化。
  */
-async function withCredSwap(accountHomeDir, fn, tokenMode = 'restore') {
+async function withCredSwap(accountHomeDir, fn, tokenMode = 'restore', onPhase) {
     // Unix: HOME 隔离，直接执行，无需 mutex 或 token swap
-    if (!IS_WINDOWS)
+    if (!IS_WINDOWS) {
+        onPhase?.('credential_slot_acquired');
+        onPhase?.('credential_ready');
         return fn();
+    }
     let release;
     const hold = new Promise(r => { release = r; });
     const prev = _mutexTail;
     _mutexTail = hold;
+    onPhase?.('waiting_credential_slot');
     await prev;
     try {
+        onPhase?.('credential_slot_acquired');
         // 1. 把该账号的 credential.json 换入真实 home
         const accountCred = path_1.default.join(path_1.default.resolve(accountHomeDir), CRED_RELATIVE);
         const realCred = path_1.default.join(REAL_HOME, CRED_RELATIVE);
@@ -228,6 +233,7 @@ async function withCredSwap(accountHomeDir, fn, tokenMode = 'restore') {
         else if (tokenMode === 'clear') {
             await clearRegToken();
         }
+        onPhase?.('credential_ready');
         return await fn();
     }
     finally {
@@ -302,7 +308,7 @@ function generateFreshCredential(accountHomeDir) {
  * 核心调度器：使用独立的环境变量 HOME/USERPROFILE 欺骗 CLI 去隔离文件夹中读取数据
  * 同时通过 withCredSwap 保证每次执行时使用正确账号的 credential.json
  */
-const runJimengCommand = async (command, accountHomeDir, saveBackup = false, timeoutMs = 1000 * 60 * 5) => {
+const runJimengCommand = async (command, accountHomeDir, saveBackup = false, timeoutMs = 1000 * 60 * 5, onPhase) => {
     const resolvedCommand = resolveDreaminaCommand(command);
     const env = { ...process.env };
     if (accountHomeDir) {
@@ -314,6 +320,7 @@ const runJimengCommand = async (command, accountHomeDir, saveBackup = false, tim
     }
     const runFn = async () => {
         try {
+            onPhase?.('process_started');
             const { stdout, stderr } = await execFileAsync(resolvedCommand.file, resolvedCommand.args, {
                 env,
                 timeout: timeoutMs,
@@ -327,15 +334,25 @@ const runJimengCommand = async (command, accountHomeDir, saveBackup = false, tim
             }
             return { stdout, stderr };
         }
-        catch (error) {
-            throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+        finally {
+            onPhase?.('process_finished');
         }
     };
     // 有 accountHomeDir 时，先换入该账号的 credential 再执行
     if (accountHomeDir) {
-        return withCredSwap(accountHomeDir, runFn);
+        try {
+            return await withCredSwap(accountHomeDir, runFn, 'restore', onPhase);
+        }
+        catch (error) {
+            throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+        }
     }
-    return runFn();
+    try {
+        return await runFn();
+    }
+    catch (error) {
+        throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+    }
 };
 exports.runJimengCommand = runJimengCommand;
 /**
