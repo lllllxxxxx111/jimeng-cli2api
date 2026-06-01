@@ -108,6 +108,11 @@ const sdkShowRawPollResponse = ref(false);
 const sdkShowRequestPreview = ref(false);
 const sdkShowAdvancedParams = ref(false);
 const sdkShowLegacyModes = ref(false);
+const sdkSubmitProgress = ref<any>(null);
+const sdkSubmitTraceId = ref('');
+const sdkSubmitStartedAt = ref(0);
+const sdkSubmitElapsedMs = ref(0);
+let sdkSubmitProgressTimer: number | null = null;
 
 const currentTab = ref('monitor');
 
@@ -1090,6 +1095,94 @@ const friendlySdkError = (message: string) => {
   return text || '接口测试失败';
 };
 
+const newSdkSubmitTraceId = () => `sdk_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+const sdkProgressLabel = (phase: string) => ({
+  received: '已创建请求',
+  checking_key: '检查 API Key',
+  key_checked: 'API Key 通过',
+  preparing_request: '整理请求参数',
+  waiting_account: '等待空闲账号',
+  account_ready: '账号已锁定',
+  creating_task: '创建任务记录',
+  task_created: '任务记录已创建',
+  cli_cold_start: 'CLI 冷启动',
+  starting_cli: '启动 CLI 进程',
+  waiting_submit_id: '等待即梦 submit_id',
+  parsing_submit_id: '解析 CLI 返回',
+  queued: '提交完成',
+  dry_run: 'Dry run 完成',
+  failed: '提交失败',
+}[phase] || phase || '等待后端阶段');
+
+const sdkProgressDetailLabel = () => {
+  const progress = sdkSubmitProgress.value || {};
+  const phase = String(progress.phase || 'received');
+  const details: Record<string, string> = {
+    received: '前端已发起请求，等待后端接手。',
+    checking_key: '后端正在校验 Bearer API Key。',
+    key_checked: 'API Key 已通过，继续处理请求。',
+    preparing_request: '正在解析 OpenAI SDK 请求参数和上传文件。',
+    waiting_account: '正在查找并锁定一个可用的即梦账号。',
+    account_ready: '账号已锁定，接下来创建任务记录。',
+    creating_task: '正在写入任务记录和扣减本地 Key 用量。',
+    task_created: '任务记录已创建，准备启动 dreamina CLI。',
+    cli_cold_start: '这是服务启动后的第一次 CLI 提交，正在冷启动 dreamina CLI。',
+    starting_cli: '正在启动 dreamina CLI 进程。',
+    waiting_submit_id: 'CLI 进程运行中，正在等待即梦返回 submit_id / log_id。',
+    parsing_submit_id: 'CLI 已返回，正在解析 submit_id / log_id。',
+    queued: '已拿到 submit_id，任务已交给轮询守护进程。',
+    dry_run: 'dry_run 只验证参数和路由，不执行 CLI。',
+    failed: '请求失败，下面会显示具体错误。',
+  };
+  return details[phase] || progress.detail || '';
+};
+
+const sdkProgressElapsedLabel = () => {
+  const ms = Number(sdkSubmitProgress.value?.elapsedMs ?? sdkSubmitElapsedMs.value ?? 0);
+  if (!Number.isFinite(ms) || ms <= 0) return '0.0s';
+  return `${(ms / 1000).toFixed(1)}s`;
+};
+
+const stopSdkProgressPolling = () => {
+  if (sdkSubmitProgressTimer !== null) {
+    window.clearInterval(sdkSubmitProgressTimer);
+    sdkSubmitProgressTimer = null;
+  }
+};
+
+const fetchSdkSubmitProgress = async (traceId: string) => {
+  const key = activeSdkApiKey();
+  if (!traceId || !key) return;
+  const res = await fetch(`/v1/submit-progress/${encodeURIComponent(traceId)}`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (!res.ok) return;
+  const data = await res.json();
+  sdkSubmitProgress.value = data;
+  sdkSubmitElapsedMs.value = Number(data.elapsedMs || sdkSubmitElapsedMs.value || 0);
+  if (data.done) stopSdkProgressPolling();
+};
+
+const startSdkProgressPolling = (traceId: string) => {
+  stopSdkProgressPolling();
+  sdkSubmitTraceId.value = traceId;
+  sdkSubmitStartedAt.value = Date.now();
+  sdkSubmitElapsedMs.value = 0;
+  sdkSubmitProgress.value = {
+    id: traceId,
+    phase: 'received',
+    detail: 'frontend request created; waiting for backend stage',
+    elapsedMs: 0,
+    done: false,
+  };
+  sdkSubmitProgressTimer = window.setInterval(() => {
+    sdkSubmitElapsedMs.value = Date.now() - sdkSubmitStartedAt.value;
+    fetchSdkSubmitProgress(traceId).catch(() => {});
+  }, 500);
+  fetchSdkSubmitProgress(traceId).catch(() => {});
+};
+
 const callOpenAiApi = async (path: string, options: any = {}) => {
   const key = activeSdkApiKey();
   if (!key) throw new Error('请先选择或粘贴一个完整 API Key');
@@ -1123,22 +1216,30 @@ const runSdkTest = async () => {
   sdkPollResponse.value = null;
   sdkShowRawResponse.value = false;
   sdkShowRawPollResponse.value = false;
+  if (!activeSdkApiKey()) {
+    sdkError.value = '请先选择或粘贴一个完整 API Key';
+    sdkLoading.value = false;
+    return;
+  }
+  const traceId = newSdkSubmitTraceId();
+  startSdkProgressPolling(traceId);
+  const progressHeaders = { 'X-Jimeng-Submit-Trace': traceId };
   try {
     syncSdkImageResolution();
     syncSdkVideoOptions();
     const endpoint = sdkEndpoint();
     let data: any;
     if (endpoint.method === 'GET') {
-      data = await callOpenAiApi(endpoint.path, { method: 'GET' });
+      data = await callOpenAiApi(endpoint.path, { method: 'GET', headers: progressHeaders });
     } else if (endpoint.contentType === 'json') {
-      data = await callOpenAiApi(endpoint.path, { method: endpoint.method, json: buildSdkPayload() });
+      data = await callOpenAiApi(endpoint.path, { method: endpoint.method, headers: progressHeaders, json: buildSdkPayload() });
     } else {
       const payload = buildSdkPayload() || {};
       const form = new FormData();
       for (const [key, value] of Object.entries(payload)) {
         appendSdkFormValue(form, key, value);
       }
-      data = await callOpenAiApi(endpoint.path, { method: endpoint.method, body: form });
+      data = await callOpenAiApi(endpoint.path, { method: endpoint.method, headers: progressHeaders, body: form });
     }
     sdkResponse.value = data;
     refreshOperationalData();
@@ -1146,6 +1247,9 @@ const runSdkTest = async () => {
     sdkError.value = error.message || '接口测试失败';
     if (error.response) sdkResponse.value = error.response;
   } finally {
+    await fetchSdkSubmitProgress(traceId).catch(() => {});
+    stopSdkProgressPolling();
+    sdkSubmitElapsedMs.value = Date.now() - sdkSubmitStartedAt.value;
     sdkLoading.value = false;
   }
 };
@@ -1171,8 +1275,13 @@ const pollSdkResult = async () => {
 };
 
 const clearSdkResult = () => {
+  stopSdkProgressPolling();
   sdkResponse.value = null;
   sdkPollResponse.value = null;
+  sdkSubmitProgress.value = null;
+  sdkSubmitTraceId.value = '';
+  sdkSubmitStartedAt.value = 0;
+  sdkSubmitElapsedMs.value = 0;
   sdkError.value = '';
   sdkShowRawResponse.value = false;
   sdkShowRawPollResponse.value = false;
@@ -2926,6 +3035,20 @@ onMounted(() => {
                     <p class="text-slate-400">下一步</p>
                     <p class="font-black mt-1">{{ sdkNextActionLabel() }}</p>
                   </div>
+                </div>
+                <div v-if="sdkLoading || sdkSubmitProgress" class="mt-3 bg-white/10 p-3 rounded-lg text-xs min-w-0">
+                  <div class="flex items-center justify-between gap-3">
+                    <p class="text-slate-400">CLI 状态</p>
+                    <span class="font-mono text-slate-300">{{ sdkProgressElapsedLabel() }}</span>
+                  </div>
+                  <p class="font-black mt-1">{{ sdkProgressLabel(sdkSubmitProgress?.phase || 'received') }}</p>
+                  <p v-if="sdkProgressDetailLabel()" class="text-slate-400 mt-1 leading-5">{{ sdkProgressDetailLabel() }}</p>
+                  <div v-if="sdkSubmitProgress?.accountName || sdkSubmitProgress?.taskId || sdkSubmitProgress?.submitId" class="mt-2 space-y-1 text-slate-300">
+                    <p v-if="sdkSubmitProgress?.accountName">账号：{{ sdkSubmitProgress.accountName }}</p>
+                    <p v-if="sdkSubmitProgress?.taskId" class="break-all">任务：{{ sdkSubmitProgress.taskId }}</p>
+                    <p v-if="sdkSubmitProgress?.submitId" class="break-all">submit_id：{{ sdkSubmitProgress.submitId }}</p>
+                  </div>
+                  <p v-if="sdkSubmitProgress?.error" class="text-red-200 mt-2 break-words">{{ sdkSubmitProgress.error }}</p>
                 </div>
                 <div v-if="extractTaskIdFromSdkResponse(sdkResponse)" class="mt-2 bg-white/10 p-3 rounded-lg text-xs min-w-0">
                   <p class="text-slate-400">任务 ID</p>

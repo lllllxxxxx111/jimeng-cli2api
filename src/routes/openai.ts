@@ -22,10 +22,12 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 import { downloadRemoteInput } from '../utils/remoteInput';
+import { getSubmitProgress, normalizeSubmitProgressId, updateSubmitProgress } from '../services/submitProgress';
 
 const router = Router();
 const prisma = new PrismaClient();
 const execFileAsync = promisify(execFile);
+let cliSubmitCommandCount = 0;
 
 const MB = 1024 * 1024;
 const IMAGE_MAX_BYTES = 30 * MB;
@@ -1022,6 +1024,24 @@ const httpError = (statusCode: number, message: string) => {
 
 const getHttpStatus = (error: any) => error?.statusCode || error?.status || 500;
 
+const getSubmitTraceId = (req: Request) => {
+  return normalizeSubmitProgressId(req.headers['x-jimeng-submit-trace']);
+};
+
+const markSubmitProgress = (
+  req: Request,
+  phase: Parameters<typeof updateSubmitProgress>[1],
+  patch: Parameters<typeof updateSubmitProgress>[2] = {}
+) => {
+  const traceId = getSubmitTraceId(req);
+  if (!traceId) return;
+  updateSubmitProgress(traceId, phase, {
+    method: req.method,
+    path: req.originalUrl || req.path,
+    ...patch,
+  });
+};
+
 const getNoVipStatus = (message: string) => {
   return /vip|member|会员/i.test(message) ? 'NO_VIP' : 'ERROR';
 };
@@ -1378,6 +1398,7 @@ const dispatchQueuedTask = async (
   let account: any = null;
   try {
     if (isDryRunRequest(req)) {
+      markSubmitProgress(req, 'dry_run', { detail: 'dry run requested; CLI was not executed' });
       return {
         id: `dry_${randomUUID()}`,
         status: 'processing',
@@ -1389,14 +1410,22 @@ const dispatchQueuedTask = async (
       };
     }
 
+    markSubmitProgress(req, 'waiting_account', { detail: 'selecting an idle Dreamina account' });
     account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
     if (!account) {
+      markSubmitProgress(req, 'failed', { error: 'All Dreamina accounts are busy or out of credits.' });
       throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
     }
+    markSubmitProgress(req, 'account_ready', {
+      accountId: account.id,
+      accountName: account.name,
+      detail: 'Dreamina account locked for this submit',
+    });
 
     console.log(`[Jimeng Dispatcher] Executing: ${options.command}`);
 
     const apiKeyId = String((req as any).apiUserId);
+    markSubmitProgress(req, 'creating_task', { detail: 'creating local task record before CLI submit' });
     const dbTask = await prisma.$transaction(async (tx) => {
       const apiKey = await tx.apiKey.findUnique({ where: { id: apiKeyId } });
       if (!apiKey) throw httpError(401, 'Invalid API Key');
@@ -1419,15 +1448,50 @@ const dispatchQueuedTask = async (
       });
       return task;
     });
+    markSubmitProgress(req, 'task_created', {
+      taskId: dbTask.id,
+      command: options.command,
+      detail: 'task record created; CLI submit can start',
+    });
 
     try {
+      const isColdStart = cliSubmitCommandCount === 0;
+      cliSubmitCommandCount += 1;
+      markSubmitProgress(req, isColdStart ? 'cli_cold_start' : 'starting_cli', {
+        taskId: dbTask.id,
+        command: options.command,
+        detail: isColdStart ? 'first CLI submit command since this server started' : 'starting a Dreamina CLI process',
+      });
+      const traceId = getSubmitTraceId(req);
+      const waitingTimer = traceId
+        ? setTimeout(() => {
+            const snapshot = getSubmitProgress(traceId);
+            if (snapshot && !snapshot.done && (snapshot.phase === 'cli_cold_start' || snapshot.phase === 'starting_cli')) {
+              updateSubmitProgress(traceId, 'waiting_submit_id', {
+                taskId: dbTask.id,
+                command: options.command,
+                detail: 'CLI process is running; waiting for Dreamina submit_id/log_id',
+              });
+            }
+          }, 1200)
+        : null;
       const { stdout } = await runJimengCommand(options.command, account.homeDir);
+      if (waitingTimer) clearTimeout(waitingTimer);
+      markSubmitProgress(req, 'parsing_submit_id', {
+        taskId: dbTask.id,
+        detail: 'CLI finished; parsing submit_id/log_id from stdout',
+      });
       const info = extractSubmitInfo(stdout);
       await prisma.task.update({
         where: { id: dbTask.id },
         data: { status: 'PROCESSING', jimengSubmitId: info.submitId, jimengLogId: info.logId },
       });
       await accountService.releaseAccount(account.id, 'IDLE');
+      markSubmitProgress(req, 'queued', {
+        taskId: dbTask.id,
+        submitId: info.submitId,
+        detail: 'submit_id received; task handed to polling daemon',
+      });
 
       return {
         id: dbTask.id,
@@ -1442,9 +1506,15 @@ const dispatchQueuedTask = async (
         data: { status: 'FAILED', errorMsg: cmdErr.message },
       });
       await accountService.releaseAccount(account.id, getNoVipStatus(cmdErr.message || ''));
+      markSubmitProgress(req, 'failed', {
+        taskId: dbTask.id,
+        error: cmdErr.message,
+        detail: 'Dreamina CLI submit failed',
+      });
       throw httpError(500, 'Jimeng CLI failed: ' + cmdErr.message);
     }
   } catch (error: any) {
+    markSubmitProgress(req, 'failed', { error: error.message || String(error) });
     if (account && getHttpStatus(error) !== 500) {
       try { await accountService.releaseAccount(account.id, 'IDLE'); } catch {}
     }
@@ -1786,13 +1856,21 @@ const dispatchVideoTask = async (
 };
 
 const apiKeyAuth = async (req: Request, res: Response, next: any) => {
+  markSubmitProgress(req, 'checking_key', { detail: 'checking OpenAI-compatible API key' });
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: { message: 'Missing Authorization header' } });
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    markSubmitProgress(req, 'failed', { error: 'Missing Authorization header' });
+    return res.status(401).json({ error: { message: 'Missing Authorization header' } });
+  }
   const token = authHeader.split(' ')[1];
   const apiKey = await prisma.apiKey.findUnique({ where: { key: token, isActive: true as any } });
-  if (!apiKey) return res.status(401).json({ error: { message: 'Invalid API Key' } });
+  if (!apiKey) {
+    markSubmitProgress(req, 'failed', { error: 'Invalid API Key' });
+    return res.status(401).json({ error: { message: 'Invalid API Key' } });
+  }
   (req as any).apiUserId = apiKey.id;
   (req as any).apiBoundAccountId = apiKey.boundAccountId ?? null;
+  markSubmitProgress(req, 'key_checked', { detail: 'API key accepted' });
   next();
 };
 
@@ -1824,7 +1902,8 @@ function extractSubmitInfo(stdout: string): { submitId: string; logId: string | 
     return { submitId, logId };
 }
 
-router.get('/models', apiKeyAuth, (_req: Request, res: Response) => {
+router.get('/models', apiKeyAuth, (req: Request, res: Response) => {
+  markSubmitProgress(req, 'queued', { detail: 'models returned; no CLI call needed' });
   const compatibleModels = compatibilityModelList();
   res.json({
     object: 'list',
@@ -1845,11 +1924,19 @@ router.get('/models', apiKeyAuth, (_req: Request, res: Response) => {
   });
 });
 
+router.get('/submit-progress/:id', apiKeyAuth, (req: Request, res: Response) => {
+  const progress = getSubmitProgress(String(req.params.id || ''));
+  if (!progress) return res.status(404).json({ error: { message: 'Submit progress not found' } });
+  return res.json(progress);
+});
+
 router.post('/responses', apiKeyAuth, responsesUpload.any(), async (req: Request, res: Response) => {
   try {
+    markSubmitProgress(req, 'preparing_request', { detail: 'normalizing Responses request' });
     const result = await createResponsesDispatch(req);
     return res.json(buildResponseObjectFromDispatch(result));
   } catch (error: any) {
+    markSubmitProgress(req, 'failed', { error: error.message || String(error) });
     return res.status(getHttpStatus(error)).json({ error: { message: error.message } });
   }
 });
@@ -1875,11 +1962,13 @@ router.get('/responses/:id', apiKeyAuth, async (req: Request, res: Response) => 
 
 router.post('/videos', apiKeyAuth, upload.any(), async (req: Request, res: Response) => {
   try {
+    markSubmitProgress(req, 'preparing_request', { detail: 'normalizing OpenAI videos.create request' });
     const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
     const body = normalizeOpenAIVideoBody(req.body || {});
     const result = await dispatchVideoTask(req, body, filesMap);
     return res.json(buildOpenAIVideoObjectFromDispatch(result));
   } catch (err: any) {
+    markSubmitProgress(req, 'failed', { error: err.message || String(err) });
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }
 });
@@ -1909,6 +1998,7 @@ router.get('/videos/:id/content', apiKeyAuth, async (req: Request, res: Response
 
 router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async (req: Request, res: Response) => {
   try {
+    markSubmitProgress(req, 'preparing_request', { detail: 'normalizing legacy image generation request' });
     const files = (req.files as Express.Multer.File[] | undefined) || [];
     const result = await dispatchImageTask(req, req.body || {}, files);
     return res.json({
@@ -1921,11 +2011,13 @@ router.post('/images/generations', apiKeyAuth, upload.array('images', 10), async
       model: result.model,
     });
   } catch (err: any) {
+    markSubmitProgress(req, 'failed', { error: err.message || String(err) });
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }
 });
 router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: Request, res: Response) => {
   try {
+    markSubmitProgress(req, 'preparing_request', { detail: 'normalizing image upscale request' });
     const result = await dispatchUpscaleTask(req, req.body || {}, req.file as Express.Multer.File | undefined);
     return res.json({
       id: result.id,
@@ -1937,11 +2029,13 @@ router.post('/images/upscale', apiKeyAuth, upload.single('image'), async (req: R
       model: result.model,
     });
   } catch (err: any) {
+    markSubmitProgress(req, 'failed', { error: err.message || String(err) });
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }
 });
 router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request, res: Response) => {
   try {
+    markSubmitProgress(req, 'preparing_request', { detail: 'normalizing legacy video generation request' });
     const { filesMap } = normalizeUploadedMediaFiles(req.files as Express.Multer.File[] | undefined);
     const result = await dispatchVideoTask(req, req.body || {}, filesMap);
     return res.json({
@@ -1954,6 +2048,7 @@ router.post('/videos/generations', apiKeyAuth, upload.any(), async (req: Request
       model: result.model,
     });
   } catch (err: any) {
+    markSubmitProgress(req, 'failed', { error: err.message || String(err) });
     return res.status(getHttpStatus(err)).json({ error: { message: err.message } });
   }
 });
