@@ -1098,6 +1098,7 @@ const friendlySdkError = (message: string) => {
 const newSdkSubmitTraceId = () => `sdk_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
 const sdkProgressLabel = (phase: string) => ({
+  idle: '等待发送测试请求',
   received: '已创建请求',
   checking_key: '检查 API Key',
   key_checked: 'API Key 通过',
@@ -1117,8 +1118,9 @@ const sdkProgressLabel = (phase: string) => ({
 
 const sdkProgressDetailLabel = () => {
   const progress = sdkSubmitProgress.value || {};
-  const phase = String(progress.phase || 'received');
+  const phase = String(progress.phase || 'idle');
   const details: Record<string, string> = {
+    idle: '点击发送后，这里会显示后端和 CLI 的真实执行阶段。',
     received: '前端已发起请求，等待后端接手。',
     checking_key: '后端正在校验 Bearer API Key。',
     key_checked: 'API Key 已通过，继续处理请求。',
@@ -1217,6 +1219,14 @@ const runSdkTest = async () => {
   sdkShowRawResponse.value = false;
   sdkShowRawPollResponse.value = false;
   if (!activeSdkApiKey()) {
+    sdkSubmitProgress.value = {
+      id: '',
+      phase: 'failed',
+      error: '缺少完整 API Key',
+      elapsedMs: 0,
+      done: true,
+    };
+    sdkSubmitElapsedMs.value = 0;
     sdkError.value = '请先选择或粘贴一个完整 API Key';
     sdkLoading.value = false;
     return;
@@ -3036,12 +3046,12 @@ onMounted(() => {
                     <p class="font-black mt-1">{{ sdkNextActionLabel() }}</p>
                   </div>
                 </div>
-                <div v-if="sdkLoading || sdkSubmitProgress" class="mt-3 bg-white/10 p-3 rounded-lg text-xs min-w-0">
+                <div class="mt-3 bg-white/10 p-3 rounded-lg text-xs min-w-0">
                   <div class="flex items-center justify-between gap-3">
                     <p class="text-slate-400">CLI 状态</p>
                     <span class="font-mono text-slate-300">{{ sdkProgressElapsedLabel() }}</span>
                   </div>
-                  <p class="font-black mt-1">{{ sdkProgressLabel(sdkSubmitProgress?.phase || 'received') }}</p>
+                  <p class="font-black mt-1">{{ sdkProgressLabel(sdkSubmitProgress?.phase || 'idle') }}</p>
                   <p v-if="sdkProgressDetailLabel()" class="text-slate-400 mt-1 leading-5">{{ sdkProgressDetailLabel() }}</p>
                   <div v-if="sdkSubmitProgress?.accountName || sdkSubmitProgress?.taskId || sdkSubmitProgress?.submitId" class="mt-2 space-y-1 text-slate-300">
                     <p v-if="sdkSubmitProgress?.accountName">账号：{{ sdkSubmitProgress.accountName }}</p>
