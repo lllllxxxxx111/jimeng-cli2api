@@ -1621,6 +1621,72 @@ const manualCheckLoginCommand = () => {
   return `dreamina login checklogin --device_code=${oauthModal.value.deviceCode} --poll=30`;
 };
 
+const manualHeadlessLoginCommand = () => 'dreamina login --headless';
+const manualHeadlessReloginCommand = () => 'dreamina relogin --headless';
+
+const parseHeadlessLoginOutput = (raw: string) => {
+  const text = raw.trim();
+  if (!text) return null;
+  try {
+    const json = JSON.parse(text);
+    return {
+      verificationUri: json.verificationUri || json.verification_uri || '',
+      userCode: json.userCode || json.user_code || '',
+      deviceCode: json.deviceCode || json.device_code || '',
+      expiresAt: json.expiresAt || json.expires_at || '',
+    };
+  } catch {}
+
+  const readField = (snake: string, camel: string) => {
+    const escapedSnake = snake.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedCamel = camel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return text.match(new RegExp(`${escapedSnake}\\s*[:=]\\s*(\\S+)`, 'i'))?.[1]
+      || text.match(new RegExp(`${escapedCamel}\\s*[:=]\\s*(\\S+)`, 'i'))?.[1]
+      || '';
+  };
+
+  return {
+    verificationUri: readField('verification_uri', 'verificationUri'),
+    userCode: readField('user_code', 'userCode'),
+    deviceCode: readField('device_code', 'deviceCode'),
+    expiresAt: readField('expires_at', 'expiresAt'),
+  };
+};
+
+const openManualHeadlessLogin = (id: string, name: string) => {
+  errorMessage.value = '';
+  manualLoginOutput.value = '';
+  oauthModalNotice.value = '请先在同一台服务器、同一 Windows 用户下运行无头登录命令，然后把完整输出粘贴到下面。';
+  oauthModal.value = {
+    show: true,
+    accountId: id,
+    accountName: name,
+    verificationUri: '',
+    userCode: '',
+    deviceCode: '',
+    expiresAt: '',
+    isNewAccount: false,
+    rawOutput: '',
+  };
+};
+
+const applyManualHeadlessOutput = () => {
+  const parsed = parseHeadlessLoginOutput(manualLoginOutput.value);
+  if (!parsed?.deviceCode || !parsed?.userCode || !parsed?.verificationUri) {
+    oauthModalNotice.value = '没有从粘贴内容里解析到完整的 verification_uri / user_code / device_code。';
+    return;
+  }
+  oauthModal.value = {
+    ...oauthModal.value,
+    verificationUri: parsed.verificationUri,
+    userCode: parsed.userCode,
+    deviceCode: parsed.deviceCode,
+    expiresAt: parsed.expiresAt || oauthModal.value.expiresAt,
+    rawOutput: manualLoginOutput.value.trim(),
+  };
+  oauthModalNotice.value = '已读取无头登录输出。完成网页授权后，可以点“我已完成授权”；如果你已经手动 checklogin 成功，也可以点“导入 CLI 登录态”。';
+};
+
 const doCheckLogin = async () => {
   if (!oauthModal.value.deviceCode) return alert('deviceCode 丢失，请重新点击"重新授权"。');
   checkLoginLoading.value = true;
@@ -2358,15 +2424,18 @@ onMounted(() => {
 
           <div class="px-6 py-5 space-y-4">
             <!-- 步骤说明 -->
-            <ol class="text-sm text-slate-500 space-y-1 list-decimal list-inside">
+            <ol v-if="oauthModal.verificationUri" class="text-sm text-slate-500 space-y-1 list-decimal list-inside">
               <li>点击下方按钮打开授权页面</li>
               <li>在授权页面输入下方验证码</li>
               <li>用即梦 VIP 账号登录并确认</li>
               <li>回到这里点击「我已完成授权」</li>
             </ol>
+            <div v-else class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 leading-6">
+              手动无头登录模式：先在服务器终端运行下方无头命令，把完整输出粘贴到下面并读取，再继续确认或导入。
+            </div>
 
             <!-- 授权链接 -->
-            <div class="rounded-xl border border-indigo-200 bg-indigo-50 overflow-hidden">
+            <div v-if="oauthModal.verificationUri" class="rounded-xl border border-indigo-200 bg-indigo-50 overflow-hidden">
               <div class="flex items-center justify-between px-3 py-2 border-b border-indigo-200 bg-indigo-100/60">
                 <span class="text-xs font-semibold text-indigo-600">授权链接</span>
                 <button @click="copyVerificationUri" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-200 transition">
@@ -2377,7 +2446,7 @@ onMounted(() => {
             </div>
 
             <!-- 验证码 -->
-            <div class="rounded-xl border border-amber-200 bg-amber-50 overflow-hidden">
+            <div v-if="oauthModal.userCode" class="rounded-xl border border-amber-200 bg-amber-50 overflow-hidden">
               <div class="flex items-center justify-between px-3 py-2 border-b border-amber-200 bg-amber-100/60">
                 <span class="text-xs font-semibold text-amber-700">验证码</span>
                 <div class="flex items-center gap-2">
@@ -2402,13 +2471,21 @@ onMounted(() => {
 
             <div class="rounded-xl border border-slate-200 bg-white overflow-hidden">
               <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50">
-                <span class="text-xs font-semibold text-slate-600">手动确认命令</span>
-                <button @click="nativeCopy(manualCheckLoginCommand())" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-50 transition">复制</button>
+                <span class="text-xs font-semibold text-slate-600">手动无头命令</span>
+                <button @click="nativeCopy(`${manualHeadlessLoginCommand()}\n${manualHeadlessReloginCommand()}`)" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-50 transition">复制</button>
               </div>
-              <code class="block text-xs font-mono text-slate-700 px-3 py-3 break-all">{{ manualCheckLoginCommand() }}</code>
+              <div class="px-3 py-3 space-y-2">
+                <code class="block text-xs font-mono text-slate-700 break-all">{{ manualHeadlessLoginCommand() }}</code>
+                <code class="block text-xs font-mono text-slate-700 break-all">{{ manualHeadlessReloginCommand() }}</code>
+              </div>
               <div class="border-t border-slate-100 p-3 space-y-2">
-                <textarea v-model="manualLoginOutput" rows="4" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-indigo-500 resize-y" placeholder="可粘贴手动 checklogin 的完整输出；留空也可以直接导入当前 CLI 登录态"></textarea>
-                <p class="text-xs text-slate-400 leading-5">在同一台服务器、同一 Windows 用户下手动跑完上面的命令后，点下面的导入按钮。粘贴内容用于留痕，实际 token 从本机 CLI 登录态读取。</p>
+                <textarea v-model="manualLoginOutput" rows="4" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-indigo-500 resize-y" placeholder="粘贴 dreamina login --headless / relogin --headless 的完整输出，或粘贴手动 checklogin 成功后的输出"></textarea>
+                <div class="flex flex-col sm:flex-row gap-2">
+                  <button @click="applyManualHeadlessOutput" class="flex-1 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3 py-2 rounded-lg transition">读取粘贴输出</button>
+                  <button @click="nativeCopy(manualCheckLoginCommand())" :disabled="!manualCheckLoginCommand()" class="flex-1 text-xs font-bold text-slate-700 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 border border-slate-200 px-3 py-2 rounded-lg transition">复制 checklogin 命令</button>
+                </div>
+                <code v-if="manualCheckLoginCommand()" class="block text-xs font-mono text-slate-700 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 break-all">{{ manualCheckLoginCommand() }}</code>
+                <p class="text-xs text-slate-400 leading-5">粘贴 headless 输出后会填入授权链接、验证码和 device_code。若你已经在同一用户下手动 checklogin 成功，可直接导入当前 CLI 登录态。</p>
               </div>
             </div>
           </div>
@@ -2420,7 +2497,7 @@ onMounted(() => {
           <div v-if="checkLoginLoading" class="px-6 pb-3 text-xs text-amber-600">正在调用即梦 CLI 确认授权，通常几秒内返回。未完成网页授权时不会长时间卡住。</div>
           <div class="px-6 pb-6 flex gap-3">
             <button @click="closeOAuthModal" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 transition">取消</button>
-            <button @click="doCheckLogin" :disabled="checkLoginLoading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
+            <button @click="doCheckLogin" :disabled="checkLoginLoading || !oauthModal.deviceCode" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
               {{ checkLoginLoading ? '确认授权中...' : '我已完成授权' }}
             </button>
             <button @click="importCurrentCliLogin" :disabled="manualImportLoading" class="flex-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
@@ -2784,6 +2861,9 @@ onMounted(() => {
               </button>
               <button @click="checkAccount(acc.id)" :disabled="checkingId === acc.id" class="text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ checkingId === acc.id ? 'CLI 查询中' : '检测状态' }}
+              </button>
+              <button @click="openManualHeadlessLogin(acc.id, acc.name)" class="text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
+                无头登录
               </button>
               <button @click="reloginAccount(acc.id, acc.name)" :disabled="reloginLoadingId === acc.id" class="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ reloginLoadingId === acc.id ? '授权中' : '重新授权' }}
