@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { accountService } from '../services/accountService';
 import { runJimengCommand } from '../utils/cliRunner';
 import { saveTempFile, cleanupTempFile } from '../utils/fileHandler';
+import { accountStatusForFailure, classifyAccountFailure } from '../utils/accountFailure';
 import multer from 'multer';
 
 const router = Router();
@@ -42,7 +43,8 @@ const dispatchJimengTask = async (
     const account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
     if (!account) {
       if (tempFilePath) cleanupTempFile(tempFilePath);
-      return res.status(503).json({ error: { message: 'All Dreamina accounts are busy or out of credits. Please try again later.' } });
+      const unavailable = await accountService.getUnavailableReason((req as any).apiBoundAccountId);
+      return res.status(unavailable.statusCode).json({ error: { message: unavailable.message } });
     }
 
     const command = commandBuilder(tempFilePath);
@@ -124,10 +126,10 @@ const dispatchJimengTask = async (
          where: { id: dbTask.id },
          data: { status: 'FAILED', errorMsg: cmdErr.message }
       });
-      const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');
-      await accountService.releaseAccount(account.id, isNoVip ? 'NO_VIP' : 'ERROR');
+      const accountFailure = classifyAccountFailure(cmdErr.message || '');
+      await accountService.releaseAccount(account.id, accountStatusForFailure(cmdErr.message || ''));
       if (tempFilePath) cleanupTempFile(tempFilePath);
-      return res.status(500).json({ error: { message: "Jimeng CLI failed: " + cmdErr.message } });
+      return res.status(accountFailure?.status === 'NO_VIP' ? 403 : 500).json({ error: { message: "Jimeng CLI failed: " + cmdErr.message } });
     }
 
     await accountService.releaseAccount(account.id, 'IDLE');

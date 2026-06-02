@@ -23,6 +23,7 @@ import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 import { downloadRemoteInput } from '../utils/remoteInput';
 import { getSubmitProgress, normalizeSubmitProgressId, updateSubmitProgress } from '../services/submitProgress';
+import { accountStatusForFailure, classifyAccountFailure } from '../utils/accountFailure';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1034,20 +1035,21 @@ const getHttpStatus = (error: any) => error?.statusCode || error?.status || 500;
 const classifySubmitError = (message: string, statusCode = 500) => {
   const text = String(message || '');
   const lower = text.toLowerCase();
-  if (statusCode === 401 || lower.includes('authorization') || lower.includes('invalid api key')) {
+  if (statusCode === 401 || lower.includes('missing authorization') || lower.includes('invalid api key')) {
     return { type: 'auth_error', code: 'invalid_api_key' };
   }
   if (statusCode === 429 || lower.includes('quota')) {
     return { type: 'quota_error', code: 'quota_exceeded' };
   }
-  if (lower.includes('busy') || lower.includes('out of credits')) {
-    return { type: 'account_unavailable', code: 'account_busy_or_no_credit' };
-  }
   if (/resolution_type|video_resolution|ratio|duration|must be|must contain|required|not supported|valid json|validation failed/i.test(text)) {
     return { type: 'parameter_error', code: 'invalid_request' };
   }
-  if (/vip|member|会员/i.test(text)) {
-    return { type: 'account_permission_error', code: 'vip_required' };
+  const accountFailure = classifyAccountFailure(text);
+  if (accountFailure && !(statusCode === 503 && lower.includes('all dreamina accounts'))) {
+    return { type: accountFailure.type, code: accountFailure.code };
+  }
+  if (lower.includes('busy') || lower.includes('out of credits')) {
+    return { type: 'account_unavailable', code: 'account_busy_or_no_credit' };
   }
   if (lower.includes('cannot find submit_id') || lower.includes('submit_id')) {
     return { type: 'submit_parse_error', code: 'submit_id_missing' };
@@ -1103,7 +1105,7 @@ const markSubmitFailure = (req: Request, error: any) => {
 };
 
 const getNoVipStatus = (message: string) => {
-  return /vip|member|会员/i.test(message) ? 'NO_VIP' : 'ERROR';
+  return accountStatusForFailure(message);
 };
 
 const flattenText = (value: any): string[] => {
@@ -1541,8 +1543,10 @@ const dispatchQueuedTask = async (
     markSubmitProgress(req, 'waiting_account', { detail: 'selecting an idle Dreamina account' });
     account = await accountService.getIdleAccount((req as any).apiBoundAccountId);
     if (!account) {
-      markSubmitFailure(req, httpError(503, 'All Dreamina accounts are busy or out of credits.'));
-      throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
+      const unavailable = await accountService.getUnavailableReason((req as any).apiBoundAccountId);
+      const error = httpError(unavailable.statusCode, unavailable.message);
+      markSubmitFailure(req, error);
+      throw error;
     }
     markSubmitProgress(req, 'account_ready', {
       accountId: account.id,
@@ -1675,8 +1679,11 @@ const dispatchQueuedTask = async (
         where: { id: dbTask.id },
         data: { status: 'FAILED', errorMsg: cmdErr.message },
       });
-      await accountService.releaseAccount(account.id, getNoVipStatus(cmdErr.message || ''));
-      const category = classifySubmitError(cmdErr.message || '', 500);
+      const accountFailureStatus = getNoVipStatus(cmdErr.message || '');
+      await accountService.releaseAccount(account.id, accountFailureStatus);
+      const accountFailure = classifyAccountFailure(cmdErr.message || '');
+      const statusCode = accountFailure?.status === 'NO_VIP' ? 403 : 500;
+      const category = classifySubmitError(cmdErr.message || '', statusCode);
       markSubmitProgress(req, 'failed', {
         taskId: dbTask.id,
         error: cmdErr.message,
@@ -1684,11 +1691,13 @@ const dispatchQueuedTask = async (
         errorCode: category.code,
         detail: 'Dreamina CLI submit failed',
       });
-      throw httpError(500, 'Jimeng CLI failed: ' + cmdErr.message);
+      const error = httpError(statusCode, 'Jimeng CLI failed: ' + cmdErr.message);
+      (error as any).accountReleased = true;
+      throw error;
     }
   } catch (error: any) {
     markSubmitFailure(req, error);
-    if (account && getHttpStatus(error) !== 500) {
+    if (account && !error?.accountReleased && getHttpStatus(error) !== 500) {
       try { await accountService.releaseAccount(account.id, 'IDLE'); } catch {}
     }
     throw error;

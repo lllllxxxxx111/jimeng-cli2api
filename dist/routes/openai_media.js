@@ -8,6 +8,7 @@ const client_1 = require("@prisma/client");
 const accountService_1 = require("../services/accountService");
 const cliRunner_1 = require("../utils/cliRunner");
 const fileHandler_1 = require("../utils/fileHandler");
+const accountFailure_1 = require("../utils/accountFailure");
 const multer_1 = __importDefault(require("multer"));
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
@@ -41,7 +42,8 @@ const dispatchJimengTask = async (req, res, type, commandBuilder, tempFilePath =
     if (!account) {
         if (tempFilePath)
             (0, fileHandler_1.cleanupTempFile)(tempFilePath);
-        return res.status(503).json({ error: { message: 'All Dreamina accounts are busy or out of credits. Please try again later.' } });
+        const unavailable = await accountService_1.accountService.getUnavailableReason(req.apiBoundAccountId);
+        return res.status(unavailable.statusCode).json({ error: { message: unavailable.message } });
     }
     const command = commandBuilder(tempFilePath);
     console.log(`[Jimeng Dispatcher] Account: ${account.name} -> Executing: ${command}`);
@@ -125,11 +127,11 @@ const dispatchJimengTask = async (req, res, type, commandBuilder, tempFilePath =
             where: { id: dbTask.id },
             data: { status: 'FAILED', errorMsg: cmdErr.message }
         });
-        const isNoVip = cmdErr.message.includes('高级会员') || cmdErr.message.includes('vip') || cmdErr.message.includes('VIP') || cmdErr.message.includes('member');
-        await accountService_1.accountService.releaseAccount(account.id, isNoVip ? 'NO_VIP' : 'ERROR');
+        const accountFailure = (0, accountFailure_1.classifyAccountFailure)(cmdErr.message || '');
+        await accountService_1.accountService.releaseAccount(account.id, (0, accountFailure_1.accountStatusForFailure)(cmdErr.message || ''));
         if (tempFilePath)
             (0, fileHandler_1.cleanupTempFile)(tempFilePath);
-        return res.status(500).json({ error: { message: "Jimeng CLI failed: " + cmdErr.message } });
+        return res.status(accountFailure?.status === 'NO_VIP' ? 403 : 500).json({ error: { message: "Jimeng CLI failed: " + cmdErr.message } });
     }
     await accountService_1.accountService.releaseAccount(account.id, 'IDLE');
     if (tempFilePath)

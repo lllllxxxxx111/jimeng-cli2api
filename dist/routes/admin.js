@@ -13,6 +13,7 @@ const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const axios_1 = __importDefault(require("axios"));
 const adminAuth_1 = require("../middleware/adminAuth");
 const adminStats_1 = require("../services/adminStats");
+const accountFailure_1 = require("../utils/accountFailure");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
@@ -583,6 +584,22 @@ function parseOAuthOutput(output) {
     const expiresAt = output.match(/expires_at:\s*(\S+)/)?.[1] || null;
     return { verificationUri, userCode, deviceCode, expiresAt };
 }
+const updateAccountFailure = async (accountId, error) => {
+    return prisma.jimengAccount.update({
+        where: { id: accountId },
+        data: { status: (0, accountFailure_1.accountStatusForFailure)(error), lastChecked: new Date() },
+    });
+};
+const accountFailureMessage = (error) => {
+    const failure = (0, accountFailure_1.classifyAccountFailure)(error);
+    if (failure?.status === 'NO_VIP') {
+        return '账号不是可用于该 CLI 模型的 Master VIP，或当前无可用额度。';
+    }
+    if (failure?.type === 'account_login_error') {
+        return '账号登录态无效，请重新授权。';
+    }
+    return '账号检测失败，请重新授权或检查 CLI 输出。';
+};
 // 添加新即梦账号并触发 OAuth Device Flow 登录
 router.post('/accounts/login', async (req, res) => {
     const { name } = req.body;
@@ -594,7 +611,7 @@ router.post('/accounts/login', async (req, res) => {
     try {
         const homeDir = assertInside(ACCOUNTS_ROOT, path_1.default.resolve(ACCOUNTS_ROOT, `${safeAccountDirName(displayName)}_${Date.now()}`), 'account homeDir is outside the allowed data/accounts folder');
         const account = await prisma.jimengAccount.create({
-            data: { name: displayName, homeDir, status: 'IDLE', creditBalance: 0 }
+            data: { name: displayName, homeDir, status: 'PENDING_LOGIN', creditBalance: 0 }
         });
         const { spawn } = require('child_process');
         const absoluteHome = path_1.default.resolve(account.homeDir);
@@ -703,8 +720,13 @@ router.post('/accounts/:id/relogin', async (req, res) => {
             }), 'clear');
         }
         catch (err) {
-            return res.status(500).json({ error: err.message });
+            const updatedAccount = await updateAccountFailure(account.id, err.message || err);
+            return res.status(500).json({ error: err.message, account: updatedAccount });
         }
+        await prisma.jimengAccount.update({
+            where: { id: account.id },
+            data: { status: 'PENDING_LOGIN', lastChecked: new Date() },
+        });
         return res.json({ ...oauthResult });
     }
     catch (error) {
@@ -769,29 +791,46 @@ router.post('/accounts/:id/headless-login', async (req, res) => {
             }), 'clear');
         }
         catch (err) {
-            return res.status(500).json({ error: err.message });
+            const updatedAccount = await updateAccountFailure(account.id, err.message || err);
+            return res.status(500).json({ error: err.message, account: updatedAccount });
         }
         if (oauthResult.alreadyLoggedIn) {
             (0, cliRunner_1.saveCredentialBackup)(absoluteHome);
             await (0, cliRunner_1.saveRegToken)(absoluteHome);
-            const { stdout } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
-            const updatedAccount = await prisma.jimengAccount.update({
-                where: { id: account.id },
-                data: {
-                    status: account.status === 'NO_VIP' ? 'NO_VIP' : 'IDLE',
-                    creditBalance: parseCreditBalance(stdout, account.creditBalance),
-                    lastChecked: new Date(),
-                },
-            });
-            return res.json({
-                success: true,
-                alreadyLoggedIn: true,
-                mode: 'login',
-                rawOutput: oauthResult.rawOutput,
-                account: updatedAccount,
-                creditOutput: stdout,
-            });
+            try {
+                const { stdout } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
+                const updatedAccount = await prisma.jimengAccount.update({
+                    where: { id: account.id },
+                    data: {
+                        status: account.status === 'NO_VIP' ? 'NO_VIP' : 'IDLE',
+                        creditBalance: parseCreditBalance(stdout, account.creditBalance),
+                        lastChecked: new Date(),
+                    },
+                });
+                return res.json({
+                    success: true,
+                    alreadyLoggedIn: true,
+                    mode: 'login',
+                    rawOutput: oauthResult.rawOutput,
+                    account: updatedAccount,
+                    creditOutput: stdout,
+                });
+            }
+            catch (error) {
+                const updatedAccount = await updateAccountFailure(account.id, error.message || error);
+                return res.status((0, accountFailure_1.classifyAccountFailure)(error.message || error)?.status === 'NO_VIP' ? 403 : 500).json({
+                    error: `${accountFailureMessage(error.message || error)}\n${error.message}`,
+                    alreadyLoggedIn: true,
+                    mode: 'login',
+                    rawOutput: oauthResult.rawOutput,
+                    account: updatedAccount,
+                });
+            }
         }
+        await prisma.jimengAccount.update({
+            where: { id: account.id },
+            data: { status: 'PENDING_LOGIN', lastChecked: new Date() },
+        });
         return res.json({ ...oauthResult, mode: 'login' });
     }
     catch (error) {
@@ -841,18 +880,37 @@ router.post('/accounts/:id/checklogin', async (req, res) => {
                     message: '用户尚未在浏览器完成授权，请完成后再点击确认。',
                 });
             }
-            throw e;
+            const updatedAccount = await updateAccountFailure(account.id, checkOutput);
+            return res.status((0, accountFailure_1.classifyAccountFailure)(checkOutput)?.status === 'NO_VIP' ? 403 : 500).json({
+                error: `${accountFailureMessage(checkOutput)}\n${checkOutput}`,
+                account: updatedAccount,
+                elapsedMs: Date.now() - startedAt,
+            });
         }
         console.log(`[Checklogin output]: ${checkOutput}`);
         try {
             const { stdout: creditOut } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
             if (creditOut && creditOut.includes('credit')) {
-                await prisma.jimengAccount.update({ where: { id: account.id }, data: { status: 'IDLE' } });
-                return res.json({ success: true, output: creditOut, elapsedMs: Date.now() - startedAt });
+                const updatedAccount = await prisma.jimengAccount.update({
+                    where: { id: account.id },
+                    data: { status: 'IDLE', creditBalance: parseCreditBalance(creditOut, account.creditBalance), lastChecked: new Date() },
+                });
+                return res.json({ success: true, output: creditOut, account: updatedAccount, elapsedMs: Date.now() - startedAt });
             }
         }
-        catch { }
-        res.status(500).json({ error: `授权确认失败，请重试。输出: ${checkOutput.substring(0, 300)}` });
+        catch (error) {
+            const updatedAccount = await updateAccountFailure(account.id, error.message || error);
+            return res.status((0, accountFailure_1.classifyAccountFailure)(error.message || error)?.status === 'NO_VIP' ? 403 : 500).json({
+                error: `${accountFailureMessage(error.message || error)}\n${error.message}`,
+                account: updatedAccount,
+                elapsedMs: Date.now() - startedAt,
+            });
+        }
+        const updatedAccount = await updateAccountFailure(account.id, checkOutput || 'user_credit did not return a credit payload');
+        res.status(500).json({
+            error: `授权确认失败，请重试。输出: ${checkOutput.substring(0, 300)}`,
+            account: updatedAccount,
+        });
     }
     catch (error) {
         res.status(500).json({ error: error.message });
@@ -896,14 +954,12 @@ router.post('/accounts/:id/import-current-login', async (req, res) => {
     }
     catch (error) {
         const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
+        const failure = (0, accountFailure_1.classifyAccountFailure)(error.message || error);
         const updatedAccount = account
-            ? await prisma.jimengAccount.update({
-                where: { id: account.id },
-                data: { status: 'ERROR', lastChecked: new Date() },
-            })
+            ? await updateAccountFailure(account.id, error.message || error)
             : null;
-        res.status(500).json({
-            error: `导入当前 CLI 登录态失败：\n${error.message}`,
+        res.status(failure?.status === 'NO_VIP' ? 403 : 500).json({
+            error: `导入当前 CLI 登录态失败：${account ? accountFailureMessage(error.message || error) : ''}\n${error.message}`,
             account: updatedAccount,
         });
     }
@@ -972,6 +1028,8 @@ router.post('/accounts/:id/check', async (req, res) => {
         // 运行验活及查余额命令
         const { stdout } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
         const newBalance = parseCreditBalance(stdout, account.creditBalance);
+        (0, cliRunner_1.saveCredentialBackup)(path_1.default.resolve(account.homeDir));
+        await (0, cliRunner_1.saveRegToken)(path_1.default.resolve(account.homeDir));
         // 能成功运行说明登录态是有效的，更新余额；但 NO_VIP 状态不自动恢复（需人工升级会员）
         const updatedAccount = await prisma.jimengAccount.update({
             where: { id: account.id },
@@ -981,14 +1039,12 @@ router.post('/accounts/:id/check', async (req, res) => {
     }
     catch (error) {
         const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
+        const failure = (0, accountFailure_1.classifyAccountFailure)(error.message || error);
         const updatedAccount = account
-            ? await prisma.jimengAccount.update({
-                where: { id: account.id },
-                data: { status: 'ERROR', lastChecked: new Date() }
-            })
+            ? await updateAccountFailure(account.id, error.message || error)
             : null;
-        res.status(500).json({
-            error: `账号检测失败 (可能未授权或凭证已过期)：\n${error.message}`,
+        res.status(failure?.status === 'NO_VIP' ? 403 : 500).json({
+            error: `账号检测失败：${account ? accountFailureMessage(error.message || error) : ''}\n${error.message}`,
             account: updatedAccount,
         });
     }

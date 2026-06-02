@@ -27,6 +27,7 @@ const util_1 = require("util");
 const crypto_1 = require("crypto");
 const remoteInput_1 = require("../utils/remoteInput");
 const submitProgress_1 = require("../services/submitProgress");
+const accountFailure_1 = require("../utils/accountFailure");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
@@ -937,20 +938,21 @@ const getHttpStatus = (error) => error?.statusCode || error?.status || 500;
 const classifySubmitError = (message, statusCode = 500) => {
     const text = String(message || '');
     const lower = text.toLowerCase();
-    if (statusCode === 401 || lower.includes('authorization') || lower.includes('invalid api key')) {
+    if (statusCode === 401 || lower.includes('missing authorization') || lower.includes('invalid api key')) {
         return { type: 'auth_error', code: 'invalid_api_key' };
     }
     if (statusCode === 429 || lower.includes('quota')) {
         return { type: 'quota_error', code: 'quota_exceeded' };
     }
-    if (lower.includes('busy') || lower.includes('out of credits')) {
-        return { type: 'account_unavailable', code: 'account_busy_or_no_credit' };
-    }
     if (/resolution_type|video_resolution|ratio|duration|must be|must contain|required|not supported|valid json|validation failed/i.test(text)) {
         return { type: 'parameter_error', code: 'invalid_request' };
     }
-    if (/vip|member|会员/i.test(text)) {
-        return { type: 'account_permission_error', code: 'vip_required' };
+    const accountFailure = (0, accountFailure_1.classifyAccountFailure)(text);
+    if (accountFailure && !(statusCode === 503 && lower.includes('all dreamina accounts'))) {
+        return { type: accountFailure.type, code: accountFailure.code };
+    }
+    if (lower.includes('busy') || lower.includes('out of credits')) {
+        return { type: 'account_unavailable', code: 'account_busy_or_no_credit' };
     }
     if (lower.includes('cannot find submit_id') || lower.includes('submit_id')) {
         return { type: 'submit_parse_error', code: 'submit_id_missing' };
@@ -998,7 +1000,7 @@ const markSubmitFailure = (req, error) => {
     });
 };
 const getNoVipStatus = (message) => {
-    return /vip|member|会员/i.test(message) ? 'NO_VIP' : 'ERROR';
+    return (0, accountFailure_1.accountStatusForFailure)(message);
 };
 const flattenText = (value) => {
     if (value === undefined || value === null)
@@ -1410,8 +1412,10 @@ const dispatchQueuedTask = async (req, options) => {
         markSubmitProgress(req, 'waiting_account', { detail: 'selecting an idle Dreamina account' });
         account = await accountService_1.accountService.getIdleAccount(req.apiBoundAccountId);
         if (!account) {
-            markSubmitFailure(req, httpError(503, 'All Dreamina accounts are busy or out of credits.'));
-            throw httpError(503, 'All Dreamina accounts are busy or out of credits. Please try again later.');
+            const unavailable = await accountService_1.accountService.getUnavailableReason(req.apiBoundAccountId);
+            const error = httpError(unavailable.statusCode, unavailable.message);
+            markSubmitFailure(req, error);
+            throw error;
         }
         markSubmitProgress(req, 'account_ready', {
             accountId: account.id,
@@ -1547,8 +1551,11 @@ const dispatchQueuedTask = async (req, options) => {
                 where: { id: dbTask.id },
                 data: { status: 'FAILED', errorMsg: cmdErr.message },
             });
-            await accountService_1.accountService.releaseAccount(account.id, getNoVipStatus(cmdErr.message || ''));
-            const category = classifySubmitError(cmdErr.message || '', 500);
+            const accountFailureStatus = getNoVipStatus(cmdErr.message || '');
+            await accountService_1.accountService.releaseAccount(account.id, accountFailureStatus);
+            const accountFailure = (0, accountFailure_1.classifyAccountFailure)(cmdErr.message || '');
+            const statusCode = accountFailure?.status === 'NO_VIP' ? 403 : 500;
+            const category = classifySubmitError(cmdErr.message || '', statusCode);
             markSubmitProgress(req, 'failed', {
                 taskId: dbTask.id,
                 error: cmdErr.message,
@@ -1556,12 +1563,14 @@ const dispatchQueuedTask = async (req, options) => {
                 errorCode: category.code,
                 detail: 'Dreamina CLI submit failed',
             });
-            throw httpError(500, 'Jimeng CLI failed: ' + cmdErr.message);
+            const error = httpError(statusCode, 'Jimeng CLI failed: ' + cmdErr.message);
+            error.accountReleased = true;
+            throw error;
         }
     }
     catch (error) {
         markSubmitFailure(req, error);
-        if (account && getHttpStatus(error) !== 500) {
+        if (account && !error?.accountReleased && getHttpStatus(error) !== 500) {
             try {
                 await accountService_1.accountService.releaseAccount(account.id, 'IDLE');
             }

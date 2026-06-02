@@ -214,6 +214,20 @@ function persistCredOwner(accountHomeDir) {
     }
     catch { }
 }
+function samePath(a, b) {
+    return path_1.default.resolve(a).toLowerCase() === path_1.default.resolve(b).toLowerCase();
+}
+function backupRealCredentialToOwner(ownerHomeDir) {
+    const realCred = path_1.default.join(REAL_HOME, CRED_RELATIVE);
+    if (!fs_1.default.existsSync(realCred))
+        return;
+    try {
+        const ownerCred = path_1.default.join(path_1.default.resolve(ownerHomeDir), CRED_RELATIVE);
+        fs_1.default.mkdirSync(path_1.default.dirname(ownerCred), { recursive: true });
+        fs_1.default.copyFileSync(realCred, ownerCred);
+    }
+    catch { }
+}
 // 简单异步互斥锁，防止多账号并发时 credential 互相覆盖
 // Unix 上 go-keyring fallback 天然遵循 HOME 环境变量，无需 mutex；Windows 需要串行
 const IS_WINDOWS = process.platform === 'win32';
@@ -243,6 +257,12 @@ async function withCredSwap(accountHomeDir, fn, tokenMode = 'restore', onPhase) 
     try {
         onPhase?.('credential_slot_acquired');
         // 1. 把该账号的 credential.json 换入真实 home
+        const targetHome = path_1.default.resolve(accountHomeDir);
+        const previousOwner = loadCredOwner();
+        if (previousOwner && !samePath(previousOwner, targetHome)) {
+            backupRealCredentialToOwner(previousOwner);
+            await saveRegToken(previousOwner);
+        }
         const accountCred = path_1.default.join(path_1.default.resolve(accountHomeDir), CRED_RELATIVE);
         const realCred = path_1.default.join(REAL_HOME, CRED_RELATIVE);
         if (fs_1.default.existsSync(accountCred)) {
@@ -326,7 +346,6 @@ function generateFreshCredential(accountHomeDir) {
     const credDir = path_1.default.join(path_1.default.resolve(accountHomeDir), '.dreamina_cli');
     fs_1.default.mkdirSync(credDir, { recursive: true });
     fs_1.default.writeFileSync(path_1.default.join(credDir, 'credential.json'), JSON.stringify({ random_secret_key: key }, null, 2), 'utf8');
-    persistCredOwner(accountHomeDir);
 }
 /**
  * 核心调度器：使用独立的环境变量 HOME/USERPROFILE 欺骗 CLI 去隔离文件夹中读取数据

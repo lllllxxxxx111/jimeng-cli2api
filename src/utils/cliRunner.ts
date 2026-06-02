@@ -227,6 +227,20 @@ function persistCredOwner(accountHomeDir: string): void {
   } catch {}
 }
 
+function samePath(a: string, b: string): boolean {
+  return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+}
+
+function backupRealCredentialToOwner(ownerHomeDir: string): void {
+  const realCred = path.join(REAL_HOME, CRED_RELATIVE);
+  if (!fs.existsSync(realCred)) return;
+  try {
+    const ownerCred = path.join(path.resolve(ownerHomeDir), CRED_RELATIVE);
+    fs.mkdirSync(path.dirname(ownerCred), { recursive: true });
+    fs.copyFileSync(realCred, ownerCred);
+  } catch {}
+}
+
 // 简单异步互斥锁，防止多账号并发时 credential 互相覆盖
 // Unix 上 go-keyring fallback 天然遵循 HOME 环境变量，无需 mutex；Windows 需要串行
 const IS_WINDOWS = process.platform === 'win32';
@@ -263,6 +277,12 @@ export async function withCredSwap<T>(
   try {
     onPhase?.('credential_slot_acquired');
     // 1. 把该账号的 credential.json 换入真实 home
+    const targetHome = path.resolve(accountHomeDir);
+    const previousOwner = loadCredOwner();
+    if (previousOwner && !samePath(previousOwner, targetHome)) {
+      backupRealCredentialToOwner(previousOwner);
+      await saveRegToken(previousOwner);
+    }
     const accountCred = path.join(path.resolve(accountHomeDir), CRED_RELATIVE);
     const realCred = path.join(REAL_HOME, CRED_RELATIVE);
     if (fs.existsSync(accountCred)) {
@@ -349,7 +369,6 @@ export function generateFreshCredential(accountHomeDir: string): void {
     JSON.stringify({ random_secret_key: key }, null, 2),
     'utf8'
   );
-  persistCredOwner(accountHomeDir);
 }
 
 /**

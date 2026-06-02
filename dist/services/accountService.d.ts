@@ -17,5 +17,9 @@ export declare const accountService: {
         creditBalance: number;
         lastChecked: Date;
     }>;
+    getUnavailableReason(boundAccountId?: string | null): Promise<{
+        statusCode: number;
+        message: string;
+    }>;
 };
 //# sourceMappingURL=accountService.d.ts.map

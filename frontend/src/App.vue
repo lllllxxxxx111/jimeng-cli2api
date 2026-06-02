@@ -322,18 +322,24 @@ const accountStatusLabel = (status: string) => ({
   IDLE: '可用',
   BUSY: '忙碌',
   ERROR: '异常',
+  NO_VIP: '非会员/无额度',
+  PENDING_LOGIN: '待授权',
 }[status] || status || '-');
 
 const accountStatusClass = (status: string) => ({
   IDLE: 'bg-emerald-100 text-emerald-700',
   BUSY: 'bg-blue-100 text-blue-700',
   ERROR: 'bg-red-100 text-red-600',
+  NO_VIP: 'bg-amber-100 text-amber-700',
+  PENDING_LOGIN: 'bg-slate-100 text-slate-600',
 }[status] || 'bg-slate-100 text-slate-500');
 
 const accountDotClass = (status: string) => ({
   IDLE: 'bg-emerald-400',
   BUSY: 'bg-blue-400',
   ERROR: 'bg-red-400',
+  NO_VIP: 'bg-amber-400',
+  PENDING_LOGIN: 'bg-slate-400',
 }[status] || 'bg-slate-300');
 
 const operationHealth = () => {
@@ -1571,6 +1577,11 @@ const createNewAccount = async () => {
       oauthModalNotice.value = '';
       oauthModal.value = { show: true, accountId: data.account.id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: true, rawOutput: data.rawOutput || '' };
     } else {
+      if (data.account?.id) {
+        try {
+          await authFetch(`/admin/accounts/${data.account.id}`, { method: 'DELETE' });
+        } catch {}
+      }
       errorMessage.value = '未获取到 OAuth 授权信息，请重试。';
       createAccountModal.value.error = '未获取到 OAuth 授权信息，请重试。';
     }
@@ -1633,6 +1644,20 @@ const closeOAuthModal = async () => {
     } catch {}
     await fetchAccounts();
   }
+};
+
+const cleanupFailedNewAccount = async (message: string) => {
+  const { isNewAccount, accountId, accountName } = oauthModal.value;
+  if (!isNewAccount || !accountId) return false;
+  try {
+    await authFetch(`/admin/accounts/${accountId}`, { method: 'DELETE' });
+  } catch {}
+  oauthModal.value.show = false;
+  manualLoginOutput.value = '';
+  oauthModalNotice.value = '';
+  errorMessage.value = `${message} 已清理临时账号「${accountName}」，不会加入可用账号池。`;
+  await fetchAccounts();
+  return true;
 };
 
 const oauthHeadlessOutputText = () => {
@@ -1762,7 +1787,9 @@ const doCheckLogin = async () => {
       oauthModalNotice.value = '';
       await fetchAccounts();
     } else {
-      oauthModalNotice.value = data.error || '授权确认失败，请重试。';
+      const message = data.error || '授权确认失败，请重试。';
+      if (await cleanupFailedNewAccount(message)) return;
+      oauthModalNotice.value = message;
       await fetchAccounts();
     }
   } catch (e: any) {
@@ -1795,7 +1822,9 @@ const importCurrentCliLogin = async () => {
         const index = accounts.value.findIndex((a: any) => a.id === oauthModal.value.accountId);
         if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
       }
-      oauthModalNotice.value = data.error || '导入当前 CLI 登录态失败';
+      const message = data.error || '导入当前 CLI 登录态失败';
+      if (await cleanupFailedNewAccount(message)) return;
+      oauthModalNotice.value = message;
     }
   } catch (e: any) {
     oauthModalNotice.value = '导入当前 CLI 登录态失败: ' + e.message;

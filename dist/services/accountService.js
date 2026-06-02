@@ -44,6 +44,43 @@ exports.accountService = {
             where: { id: accountId },
             data: { status: newStatus }
         });
+    },
+    async getUnavailableReason(boundAccountId) {
+        if (boundAccountId) {
+            const account = await prisma.jimengAccount.findUnique({ where: { id: boundAccountId } });
+            if (!account) {
+                return { statusCode: 404, message: 'Bound Dreamina account was not found. Rebind the API key to an existing account.' };
+            }
+            if (account.status === 'NO_VIP') {
+                return { statusCode: 403, message: `Bound Dreamina account "${account.name}" is not eligible for this CLI model or has no credits. Use a Master VIP account or rebind the API key.` };
+            }
+            if (account.status === 'ERROR') {
+                return { statusCode: 409, message: `Bound Dreamina account "${account.name}" is not logged in or failed health check. Reauthorize it before submitting.` };
+            }
+            if (account.status === 'PENDING_LOGIN') {
+                return { statusCode: 409, message: `Bound Dreamina account "${account.name}" is still pending authorization. Finish login before submitting.` };
+            }
+            if (account.status === 'BUSY') {
+                return { statusCode: 409, message: `Bound Dreamina account "${account.name}" is currently busy. Please try again later.` };
+            }
+            return { statusCode: 503, message: `Bound Dreamina account "${account.name}" is not available for scheduling.` };
+        }
+        const accounts = await prisma.jimengAccount.findMany({ select: { status: true } });
+        if (accounts.length === 0) {
+            return { statusCode: 503, message: 'No Dreamina accounts are configured. Add and authorize an account before submitting.' };
+        }
+        const count = (status) => accounts.filter((account) => account.status === status).length;
+        const noVip = count('NO_VIP');
+        const errors = count('ERROR');
+        const pending = count('PENDING_LOGIN');
+        const busy = count('BUSY');
+        if (noVip > 0 && noVip + errors + pending + busy === accounts.length) {
+            return { statusCode: 403, message: 'All Dreamina accounts are unavailable because they are not Master VIP eligible, have no credits, need reauthorization, or are busy.' };
+        }
+        if (errors > 0 || pending > 0) {
+            return { statusCode: 409, message: 'No usable Dreamina account is available. Some accounts need login, health check, or authorization cleanup.' };
+        }
+        return { statusCode: 503, message: 'All Dreamina accounts are busy. Please try again later.' };
     }
 };
 //# sourceMappingURL=accountService.js.map
