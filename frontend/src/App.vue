@@ -49,6 +49,7 @@ const rebindModal = ref<{ show: boolean; keyId: string; keyOwner: string; curren
 const rebindNewAccountId = ref<string>('');
 const checkingId = ref<string | null>(null);
 const reloginLoadingId = ref<string | null>(null);
+const headlessLoginLoadingId = ref<string | null>(null);
 
 // ── 任务管理 ──
 const tasks = ref<any[]>([]);
@@ -1616,14 +1617,6 @@ const oauthHeadlessOutputText = () => {
   ].filter(Boolean).join('\n');
 };
 
-const manualCheckLoginCommand = () => {
-  if (!oauthModal.value.deviceCode) return '';
-  return `dreamina login checklogin --device_code=${oauthModal.value.deviceCode} --poll=30`;
-};
-
-const manualHeadlessLoginCommand = () => 'dreamina login --headless';
-const manualHeadlessReloginCommand = () => 'dreamina relogin --headless';
-
 const parseHeadlessLoginOutput = (raw: string) => {
   const text = raw.trim();
   if (!text) return null;
@@ -1653,21 +1646,53 @@ const parseHeadlessLoginOutput = (raw: string) => {
   };
 };
 
-const openManualHeadlessLogin = (id: string, name: string) => {
+const runHeadlessLoginAccount = async (id: string, name: string) => {
+  headlessLoginLoadingId.value = id;
   errorMessage.value = '';
   manualLoginOutput.value = '';
-  oauthModalNotice.value = '请先在同一台服务器、同一 Windows 用户下运行无头登录命令，然后把完整输出粘贴到下面。';
-  oauthModal.value = {
-    show: true,
-    accountId: id,
-    accountName: name,
-    verificationUri: '',
-    userCode: '',
-    deviceCode: '',
-    expiresAt: '',
-    isNewAccount: false,
-    rawOutput: '',
-  };
+  oauthModalNotice.value = '';
+  try {
+    const res = await authFetch(`/admin/accounts/${id}/headless-login`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.alreadyLoggedIn) {
+      if (data.account) {
+        const index = accounts.value.findIndex((a: any) => a.id === id);
+        if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
+      }
+      oauthModal.value = {
+        show: true,
+        accountId: id,
+        accountName: name,
+        verificationUri: '',
+        userCode: '',
+        deviceCode: '',
+        expiresAt: '',
+        isNewAccount: false,
+        rawOutput: data.rawOutput || '',
+      };
+      oauthModalNotice.value = 'Windows 本机已执行 dreamina login --headless，CLI 复用了当前登录态，账号状态已刷新。';
+      successMessage.value = `账号 "${name}" 已处于登录状态`;
+    } else if (res.ok && data.verificationUri) {
+      oauthModal.value = {
+        show: true,
+        accountId: id,
+        accountName: name,
+        verificationUri: data.verificationUri,
+        userCode: data.userCode || '',
+        deviceCode: data.deviceCode || '',
+        expiresAt: data.expiresAt || '',
+        isNewAccount: false,
+        rawOutput: data.rawOutput || '',
+      };
+      oauthModalNotice.value = 'Windows 本机已执行 dreamina login --headless，完整返回值已显示在下方。';
+    } else {
+      errorMessage.value = data.error || '无头登录失败';
+    }
+  } catch (e: any) {
+    errorMessage.value = `无头登录失败: ${e.message}`;
+  } finally {
+    headlessLoginLoadingId.value = null;
+  }
 };
 
 const applyManualHeadlessOutput = () => {
@@ -2431,7 +2456,7 @@ onMounted(() => {
               <li>回到这里点击「我已完成授权」</li>
             </ol>
             <div v-else class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 leading-6">
-              手动无头登录模式：先在服务器终端运行下方无头命令，把完整输出粘贴到下面并读取，再继续确认或导入。
+              无头登录会由当前 Windows 服务进程直接执行。也可以把其他地方拿到的完整 headless 输出粘贴到下面并读取。
             </div>
 
             <!-- 授权链接 -->
@@ -2471,21 +2496,14 @@ onMounted(() => {
 
             <div class="rounded-xl border border-slate-200 bg-white overflow-hidden">
               <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50">
-                <span class="text-xs font-semibold text-slate-600">手动无头命令</span>
-                <button @click="nativeCopy(`${manualHeadlessLoginCommand()}\n${manualHeadlessReloginCommand()}`)" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-50 transition">复制</button>
+                <span class="text-xs font-semibold text-slate-600">粘贴已有 Headless 输出（可选）</span>
               </div>
-              <div class="px-3 py-3 space-y-2">
-                <code class="block text-xs font-mono text-slate-700 break-all">{{ manualHeadlessLoginCommand() }}</code>
-                <code class="block text-xs font-mono text-slate-700 break-all">{{ manualHeadlessReloginCommand() }}</code>
-              </div>
-              <div class="border-t border-slate-100 p-3 space-y-2">
-                <textarea v-model="manualLoginOutput" rows="4" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-indigo-500 resize-y" placeholder="粘贴 dreamina login --headless / relogin --headless 的完整输出，或粘贴手动 checklogin 成功后的输出"></textarea>
+              <div class="p-3 space-y-2">
+                <textarea v-model="manualLoginOutput" rows="4" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-indigo-500 resize-y" placeholder="可粘贴完整 headless 输出，或粘贴手动 checklogin 成功后的输出"></textarea>
                 <div class="flex flex-col sm:flex-row gap-2">
                   <button @click="applyManualHeadlessOutput" class="flex-1 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3 py-2 rounded-lg transition">读取粘贴输出</button>
-                  <button @click="nativeCopy(manualCheckLoginCommand())" :disabled="!manualCheckLoginCommand()" class="flex-1 text-xs font-bold text-slate-700 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 border border-slate-200 px-3 py-2 rounded-lg transition">复制 checklogin 命令</button>
                 </div>
-                <code v-if="manualCheckLoginCommand()" class="block text-xs font-mono text-slate-700 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 break-all">{{ manualCheckLoginCommand() }}</code>
-                <p class="text-xs text-slate-400 leading-5">粘贴 headless 输出后会填入授权链接、验证码和 device_code。若你已经在同一用户下手动 checklogin 成功，可直接导入当前 CLI 登录态。</p>
+                <p class="text-xs text-slate-400 leading-5">粘贴 headless 输出后会填入授权链接、验证码和 device_code。若已经在同一用户下手动 checklogin 成功，可直接导入当前 CLI 登录态。</p>
               </div>
             </div>
           </div>
@@ -2862,8 +2880,8 @@ onMounted(() => {
               <button @click="checkAccount(acc.id)" :disabled="checkingId === acc.id" class="text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ checkingId === acc.id ? 'CLI 查询中' : '检测状态' }}
               </button>
-              <button @click="openManualHeadlessLogin(acc.id, acc.name)" class="text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
-                无头登录
+              <button @click="runHeadlessLoginAccount(acc.id, acc.name)" :disabled="headlessLoginLoadingId === acc.id" class="text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-50 border border-slate-200 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
+                {{ headlessLoginLoadingId === acc.id ? '无头登录中' : '无头登录' }}
               </button>
               <button @click="reloginAccount(acc.id, acc.name)" :disabled="reloginLoadingId === acc.id" class="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ reloginLoadingId === acc.id ? '授权中' : '重新授权' }}

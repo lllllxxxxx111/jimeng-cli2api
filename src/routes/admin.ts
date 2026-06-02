@@ -745,6 +745,91 @@ router.post('/accounts/:id/relogin', async (req: Request, res: Response) => {
   }
 });
 
+// 无头登录：由当前 Windows 服务进程直接执行 `dreamina login --headless`，
+// 返回完整 CLI 输出，不要求用户复制命令到终端执行。
+router.post('/accounts/:id/headless-login', async (req: Request, res: Response) => {
+  try {
+    const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id as string } });
+    if (!account) return res.status(404).json({ error: "账号不存在" });
+
+    const { spawn } = require('child_process');
+    const absoluteHome = path.resolve(account.homeDir);
+    fs.mkdirSync(absoluteHome, { recursive: true });
+    const env = { ...process.env, HOME: absoluteHome, USERPROFILE: absoluteHome, APPDATA: absoluteHome, LOCALAPPDATA: absoluteHome };
+
+    generateFreshCredential(absoluteHome);
+    deleteRegTokenBackup(absoluteHome);
+    let oauthResult: ReturnType<typeof parseOAuthOutput>;
+    try {
+      oauthResult = await withCredSwap(absoluteHome, () => new Promise<ReturnType<typeof parseOAuthOutput>>((resolve, reject) => {
+        const child = spawn(DREAMINA_BIN, ['login', '--headless'], { env, shell: false, windowsHide: true });
+        let allOutput = '';
+        let done = false;
+        const finish = (ok?: ReturnType<typeof parseOAuthOutput>, err?: Error) => {
+          if (done) return;
+          done = true;
+          if (err) reject(err); else resolve(ok!);
+        };
+        const tryParse = (chunk: string) => {
+          allOutput += chunk;
+          console.log(`[Headless login stdout/err]: ${chunk}`);
+          const parsed = parseOAuthOutput(allOutput);
+          if (parsed.deviceCode && parsed.verificationUri) {
+            const result = { ...parsed, rawOutput: allOutput.trim() };
+            saveOAuthContext(absoluteHome, { ...result, updatedAt: new Date().toISOString() });
+            finish(result);
+          }
+        };
+        child.stdout.on('data', (d: any) => tryParse(d.toString()));
+        child.stderr.on('data', (d: any) => tryParse(d.toString()));
+        child.on('close', (code: any) => {
+          if (code === 0 && allOutput.trim()) {
+            return finish({
+              verificationUri: null,
+              userCode: null,
+              deviceCode: null,
+              expiresAt: null,
+              rawOutput: allOutput.trim(),
+              alreadyLoggedIn: true,
+            } as any);
+          }
+          return finish(undefined, new Error(`headless login 失败 (code=${code})，未获取到授权信息。输出：${allOutput.slice(0, 500)}`));
+        });
+        child.on('error', (err: any) => finish(undefined, err));
+        setTimeout(() => finish(undefined, new Error('等待无头登录授权信息超时（15 秒）。')), 15000);
+      }), 'clear');
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if ((oauthResult as any).alreadyLoggedIn) {
+      saveCredentialBackup(absoluteHome);
+      await saveRegToken(absoluteHome);
+      const { stdout } = await runJimengCommand('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
+      const updatedAccount = await prisma.jimengAccount.update({
+        where: { id: account.id },
+        data: {
+          status: account.status === 'NO_VIP' ? 'NO_VIP' : 'IDLE',
+          creditBalance: parseCreditBalance(stdout, account.creditBalance),
+          lastChecked: new Date(),
+        },
+      });
+      return res.json({
+        success: true,
+        alreadyLoggedIn: true,
+        mode: 'login',
+        rawOutput: (oauthResult as any).rawOutput,
+        account: updatedAccount,
+        creditOutput: stdout,
+      });
+    }
+
+    return res.json({ ...oauthResult, mode: 'login' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 读取当前 OAuth 上下文
 router.get('/accounts/:id/login-context', async (req: Request, res: Response) => {
   try {
