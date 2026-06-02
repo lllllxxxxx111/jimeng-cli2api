@@ -970,6 +970,26 @@ router.get('/accounts', async (req: Request, res: Response) => {
   }
 });
 
+// 重命名账号实例：只改显示名，保持 accountId/homeDir 不变，避免历史任务断开。
+router.patch('/accounts/:id', async (req: Request, res: Response) => {
+  try {
+    const displayName = String(req.body?.name || '').trim();
+    if (!displayName) return res.status(400).json({ error: '账号名称不能为空' });
+    if (displayName.length > 50) return res.status(400).json({ error: '账号名称不能超过 50 个字符' });
+
+    const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id as string } });
+    if (!account) return res.status(404).json({ error: '账号不存在' });
+
+    const updated = await prisma.jimengAccount.update({
+      where: { id: account.id },
+      data: { name: displayName },
+    });
+    res.json({ success: true, account: updated });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 删除账号实例（同时清理本地 homeDir 文件）
 router.delete('/accounts/:id', async (req: Request, res: Response) => {
   try {

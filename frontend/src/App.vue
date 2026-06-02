@@ -400,6 +400,7 @@ const toolTypeLabel = (toolType = '') => ({
   image_upscale: '图片放大工具',
 } as Record<string, string>)[toolType] || toolType || '-';
 const taskToolLabel = (task: any) => toolTypeLabel(normalizeToolType(task?.toolType, task?.type));
+const taskAccountLabel = (task: any) => task?.account?.name || (task?.accountId ? `历史账号 ${String(task.accountId).slice(0, 8)}` : '-');
 const toolStatsRows = () => stats.value?.tools?.byType || [];
 
 const navGroups = [
@@ -1509,6 +1510,33 @@ const checkAccount = async (id: string) => {
     console.error(`检测账号 ${id} 状态失败:`, e);
   } finally {
     checkingId.value = null;
+  }
+};
+
+const renameAccount = async (id: string, currentName: string) => {
+  const nextName = window.prompt('输入新的账号显示名', currentName);
+  if (nextName === null) return;
+  const name = nextName.trim();
+  if (!name) {
+    errorMessage.value = '账号名称不能为空';
+    return;
+  }
+  try {
+    const res = await authFetch(`/admin/accounts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name })
+    });
+    const data = await res.json();
+    if (res.ok && data.account) {
+      const index = accounts.value.findIndex((a: any) => a.id === id);
+      if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
+      successMessage.value = `账号已重命名为「${data.account.name}」`;
+      await fetchStats();
+    } else {
+      errorMessage.value = data.error || '重命名失败';
+    }
+  } catch (e: any) {
+    errorMessage.value = `重命名失败: ${e.message}`;
   }
 };
 
@@ -2798,7 +2826,7 @@ onMounted(() => {
                     <td class="px-4 py-3 text-xs text-slate-700 max-w-md break-words">{{ shortText(task.prompt, 110) || '-' }}</td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ taskToolLabel(task) }}</td>
                     <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">{{ taskAccountLabel(task) }}</td>
                     <td class="px-4 py-3 text-xs text-red-500 max-w-sm break-words">{{ shortText(task.errorMsg || task.pollErrorMsg, 100) || '-' }}</td>
                     <td class="px-4 py-3 text-xs text-slate-400">{{ new Date(task.updatedAt).toLocaleString() }}</td>
                     <td class="px-4 py-3">
@@ -2876,6 +2904,9 @@ onMounted(() => {
             <div class="flex items-center gap-2 flex-shrink-0">
               <button @click="inspectAccountTasks(acc.id)" class="text-sm font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 任务
+              </button>
+              <button @click="renameAccount(acc.id, acc.name)" class="text-sm font-semibold text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
+                重命名
               </button>
               <button @click="checkAccount(acc.id)" :disabled="checkingId === acc.id" class="text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-4 py-2 rounded-lg transition flex items-center gap-1.5">
                 {{ checkingId === acc.id ? 'CLI 查询中' : '检测状态' }}
@@ -3833,7 +3864,7 @@ onMounted(() => {
                 </div>
                 <div class="bg-slate-50 rounded-xl p-3 min-w-0">
                   <p class="font-bold text-slate-400">账号</p>
-                  <p class="text-slate-700 mt-1 break-words">{{ task.account?.name || '-' }}</p>
+                  <p class="text-slate-700 mt-1 break-words">{{ taskAccountLabel(task) }}</p>
                 </div>
                 <div class="col-span-2 bg-slate-50 rounded-xl p-3 min-w-0">
                   <p class="font-bold text-slate-400">模型</p>
@@ -3881,7 +3912,7 @@ onMounted(() => {
                 <td class="px-4 py-3 text-xs font-mono text-slate-600">{{ task.type }}</td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ taskToolLabel(task) }}</td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ task.model || '-' }}</td>
-                <td class="px-4 py-3 text-xs text-slate-500">{{ task.account?.name || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ taskAccountLabel(task) }}</td>
                 <td class="px-4 py-3 text-xs max-w-md">
                   <p class="text-slate-700 break-words">{{ shortText(task.prompt, 84) || '-' }}</p>
                   <p v-if="task.errorMsg || task.pollErrorMsg" class="text-red-500 mt-1 break-words">{{ shortText(task.errorMsg || task.pollErrorMsg, 96) }}</p>
