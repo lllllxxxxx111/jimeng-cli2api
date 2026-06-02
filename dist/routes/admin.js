@@ -17,8 +17,8 @@ const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 const OAUTH_CONTEXT_FILE = '.dreamina_oauth_context.json';
 const PROMPT_RISK_LIMIT = 12;
-const CHECKLOGIN_POLL_SECONDS = 3;
-const CHECKLOGIN_TIMEOUT_MS = 12000;
+const CHECKLOGIN_POLL_SECONDS = 30;
+const CHECKLOGIN_TIMEOUT_MS = 45000;
 const ACCOUNT_CHECK_TIMEOUT_MS = 30000;
 const NATIVE_CLI_TIMEOUT_MS = 60000;
 const NATIVE_CLI_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 5;
@@ -564,6 +564,17 @@ function readOAuthContext(accountHomeDir) {
         return null;
     }
 }
+function parseCreditBalance(stdout, fallback) {
+    try {
+        const jsonStr = stdout.substring(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1);
+        const creditInfo = JSON.parse(jsonStr);
+        if (creditInfo.total_credit !== undefined)
+            return creditInfo.total_credit;
+    }
+    catch { }
+    const match = stdout.match(/"total_credit"\s*:\s*(\d+)/);
+    return match ? parseInt(match[1], 10) : fallback;
+}
 // 解析 OAuth Device Flow 输出（verification_uri / user_code / device_code / expires_at）
 function parseOAuthOutput(output) {
     const verificationUri = output.match(/verification_uri:\s*(\S+)/)?.[1] || null;
@@ -593,6 +604,7 @@ router.post('/accounts/login', async (req, res) => {
         // 生成唯一 random_secret_key：确保此账号在 Windows Credential Manager 中有独立条目
         // relogin 删的是当前 credential 里新 key 对应的 CM 条目（根本不存在），不会影响其他账号
         (0, cliRunner_1.generateFreshCredential)(absoluteHome);
+        (0, cliRunner_1.deleteRegTokenBackup)(absoluteHome);
         let oauthResult;
         try {
             // cmMode='clear': 删除 CM 条目，让 relogin 看到空状态，不触发旧账号的服务端 logout
@@ -614,8 +626,9 @@ router.post('/accounts/login', async (req, res) => {
                     console.log(`[Login stdout/err]: ${chunk}`);
                     const parsed = parseOAuthOutput(allOutput);
                     if (parsed.deviceCode && parsed.verificationUri) {
-                        saveOAuthContext(absoluteHome, { ...parsed, updatedAt: new Date().toISOString() });
-                        finish(parsed);
+                        const result = { ...parsed, rawOutput: allOutput.trim() };
+                        saveOAuthContext(absoluteHome, { ...result, updatedAt: new Date().toISOString() });
+                        finish(result);
                     }
                 };
                 child.stdout.on('data', (d) => tryParse(d.toString()));
@@ -655,6 +668,7 @@ router.post('/accounts/:id/relogin', async (req, res) => {
         // 生成唯一 random_secret_key：确保此账号在 Windows Credential Manager 中有独立条目
         // relogin 删的是当前 credential 里新 key 对应的 CM 条目（根本不存在），不会影响其他账号
         (0, cliRunner_1.generateFreshCredential)(absoluteHome);
+        (0, cliRunner_1.deleteRegTokenBackup)(absoluteHome);
         let oauthResult;
         try {
             // cmMode='clear': 删除 CM 条目，让 relogin 看到空状态，不触发旧账号的服务端 logout
@@ -676,8 +690,9 @@ router.post('/accounts/:id/relogin', async (req, res) => {
                     console.log(`[Relogin stdout/err]: ${chunk}`);
                     const parsed = parseOAuthOutput(allOutput);
                     if (parsed.deviceCode && parsed.verificationUri) {
-                        saveOAuthContext(absoluteHome, { ...parsed, updatedAt: new Date().toISOString() });
-                        finish(parsed);
+                        const result = { ...parsed, rawOutput: allOutput.trim() };
+                        saveOAuthContext(absoluteHome, { ...result, updatedAt: new Date().toISOString() });
+                        finish(result);
                     }
                 };
                 child.stdout.on('data', (d) => tryParse(d.toString()));
@@ -725,12 +740,14 @@ router.post('/accounts/:id/checklogin', async (req, res) => {
         try {
             // saveBackup=true: checklogin 成功写入 credential 后立即在锁内备份，防止其他账号在锁释放前抢占
             const { stdout, stderr } = await (0, cliRunner_1.runJimengCommand)(`dreamina login checklogin --device_code=${deviceCode} --poll=${CHECKLOGIN_POLL_SECONDS}`, account.homeDir, true, // saveBackup
-            CHECKLOGIN_TIMEOUT_MS);
+            CHECKLOGIN_TIMEOUT_MS, undefined, 'none');
             checkOutput = stdout + stderr;
         }
         catch (e) {
             checkOutput = String(e.message || '');
-            if (checkOutput.includes('authorization_pending') || checkOutput.includes('pending')) {
+            if (checkOutput.includes('authorization_pending') ||
+                checkOutput.includes('pending') ||
+                checkOutput.includes('等待登录超时')) {
                 return res.status(202).json({
                     pending: true,
                     elapsedMs: Date.now() - startedAt,
@@ -752,6 +769,56 @@ router.post('/accounts/:id/checklogin', async (req, res) => {
     }
     catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+// 手动接管：用户在同一台服务器/同一 Windows 用户下手动完成 CLI checklogin 后，
+// 从当前本机 CLI 登录态导入 token/credential，并用 user_credit 验证。
+router.post('/accounts/:id/import-current-login', async (req, res) => {
+    try {
+        const startedAt = Date.now();
+        const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
+        if (!account)
+            return res.status(404).json({ error: '账号不存在' });
+        const absoluteHome = path_1.default.resolve(account.homeDir);
+        fs_1.default.mkdirSync(absoluteHome, { recursive: true });
+        const manualOutput = typeof req.body?.manualOutput === 'string' ? req.body.manualOutput.trim() : '';
+        if (manualOutput) {
+            fs_1.default.writeFileSync(path_1.default.join(absoluteHome, '.dreamina_manual_login_output.txt'), manualOutput.slice(0, 50000), 'utf8');
+        }
+        (0, cliRunner_1.saveCredentialBackup)(absoluteHome);
+        await (0, cliRunner_1.saveRegToken)(absoluteHome);
+        const { stdout } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
+        const newBalance = parseCreditBalance(stdout, account.creditBalance);
+        (0, cliRunner_1.saveCredentialBackup)(absoluteHome);
+        await (0, cliRunner_1.saveRegToken)(absoluteHome);
+        const updatedAccount = await prisma.jimengAccount.update({
+            where: { id: account.id },
+            data: {
+                status: account.status === 'NO_VIP' ? 'NO_VIP' : 'IDLE',
+                creditBalance: newBalance,
+                lastChecked: new Date(),
+            },
+        });
+        res.json({
+            success: true,
+            account: updatedAccount,
+            raw: stdout,
+            manualOutputSaved: Boolean(manualOutput),
+            elapsedMs: Date.now() - startedAt,
+        });
+    }
+    catch (error) {
+        const account = await prisma.jimengAccount.findUnique({ where: { id: req.params.id } });
+        const updatedAccount = account
+            ? await prisma.jimengAccount.update({
+                where: { id: account.id },
+                data: { status: 'ERROR', lastChecked: new Date() },
+            })
+            : null;
+        res.status(500).json({
+            error: `导入当前 CLI 登录态失败：\n${error.message}`,
+            account: updatedAccount,
+        });
     }
 });
 // 获取所有账号
@@ -796,22 +863,7 @@ router.post('/accounts/:id/check', async (req, res) => {
             return res.status(404).json({ error: "账号不存在" });
         // 运行验活及查余额命令
         const { stdout } = await (0, cliRunner_1.runJimengCommand)('dreamina user_credit', account.homeDir, false, ACCOUNT_CHECK_TIMEOUT_MS);
-        // 解析具体的算力数值 (CLI 返回的其实是 JSON，包含多种点数如 total_credit/vip_credit 等)
-        let newBalance = account.creditBalance;
-        try {
-            // 尝试截取并解析可能存在的 JSON 块
-            const jsonStr = stdout.substring(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1);
-            const creditInfo = JSON.parse(jsonStr);
-            if (creditInfo.total_credit !== undefined) {
-                newBalance = creditInfo.total_credit; // 抓取真正的总点数
-            }
-        }
-        catch (e) {
-            // fallback 正则解析
-            const match = stdout.match(/"total_credit"\s*:\s*(\d+)/);
-            if (match)
-                newBalance = parseInt(match[1], 10);
-        }
+        const newBalance = parseCreditBalance(stdout, account.creditBalance);
         // 能成功运行说明登录态是有效的，更新余额；但 NO_VIP 状态不自动恢复（需人工升级会员）
         const updatedAccount = await prisma.jimengAccount.update({
             where: { id: account.id },

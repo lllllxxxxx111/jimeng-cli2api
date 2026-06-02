@@ -20,9 +20,23 @@ const statsError = ref('');
 const loading = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
-const oauthModal = ref<{show:boolean;accountId:string;accountName:string;verificationUri:string;userCode:string;deviceCode:string;expiresAt:string;isNewAccount:boolean}>({ show:false, accountId:'', accountName:'', verificationUri:'', userCode:'', deviceCode:'', expiresAt:'', isNewAccount:false });
+type OAuthModalState = {
+  show: boolean;
+  accountId: string;
+  accountName: string;
+  verificationUri: string;
+  userCode: string;
+  deviceCode: string;
+  expiresAt: string;
+  isNewAccount: boolean;
+  rawOutput: string;
+};
+const oauthModal = ref<OAuthModalState>({ show:false, accountId:'', accountName:'', verificationUri:'', userCode:'', deviceCode:'', expiresAt:'', isNewAccount:false, rawOutput: '' });
 const createAccountModal = ref<{ show: boolean; name: string; error: string }>({ show: false, name: '', error: '' });
 const checkLoginLoading = ref(false);
+const manualLoginOutput = ref('');
+const manualImportLoading = ref(false);
+const oauthModalNotice = ref('');
 const userCodeCopied = ref(false);
 const verificationUriCopied = ref(false);
 const apiKeyResult = ref('');
@@ -1524,7 +1538,9 @@ const createNewAccount = async () => {
     } else if (data.account?.id && data.verificationUri) {
       createAccountModal.value.show = false;
       createAccountModal.value.name = '';
-      oauthModal.value = { show: true, accountId: data.account.id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: true };
+      manualLoginOutput.value = '';
+      oauthModalNotice.value = '';
+      oauthModal.value = { show: true, accountId: data.account.id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: true, rawOutput: data.rawOutput || '' };
     } else {
       errorMessage.value = '未获取到 OAuth 授权信息，请重试。';
       createAccountModal.value.error = '未获取到 OAuth 授权信息，请重试。';
@@ -1561,7 +1577,9 @@ const reloginAccount = async (id: string, name: string) => {
     const res = await authFetch(`/admin/accounts/${id}/relogin`, { method: 'POST' });
     const data = await res.json();
     if (res.ok && data.verificationUri) {
-      oauthModal.value = { show: true, accountId: id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: false };
+      manualLoginOutput.value = '';
+      oauthModalNotice.value = '';
+      oauthModal.value = { show: true, accountId: id, accountName: name, verificationUri: data.verificationUri, userCode: data.userCode || '', deviceCode: data.deviceCode || '', expiresAt: data.expiresAt || '', isNewAccount: false, rawOutput: data.rawOutput || '' };
     } else {
       errorMessage.value = data.error || "重新授权失败";
     }
@@ -1577,6 +1595,8 @@ const reloginAccount = async (id: string, name: string) => {
 const closeOAuthModal = async () => {
   const { isNewAccount, accountId, accountName } = oauthModal.value;
   oauthModal.value.show = false;
+  manualLoginOutput.value = '';
+  oauthModalNotice.value = '';
   if (isNewAccount && accountId) {
     try {
       await authFetch(`/admin/accounts/${accountId}`, { method: 'DELETE' });
@@ -1586,10 +1606,26 @@ const closeOAuthModal = async () => {
   }
 };
 
+const oauthHeadlessOutputText = () => {
+  if (oauthModal.value.rawOutput) return oauthModal.value.rawOutput;
+  return [
+    `verification_uri: ${oauthModal.value.verificationUri}`,
+    `user_code: ${oauthModal.value.userCode}`,
+    `device_code: ${oauthModal.value.deviceCode}`,
+    oauthModal.value.expiresAt ? `expires_at: ${oauthModal.value.expiresAt}` : '',
+  ].filter(Boolean).join('\n');
+};
+
+const manualCheckLoginCommand = () => {
+  if (!oauthModal.value.deviceCode) return '';
+  return `dreamina login checklogin --device_code=${oauthModal.value.deviceCode} --poll=30`;
+};
+
 const doCheckLogin = async () => {
   if (!oauthModal.value.deviceCode) return alert('deviceCode 丢失，请重新点击"重新授权"。');
   checkLoginLoading.value = true;
   errorMessage.value = '';
+  oauthModalNotice.value = '';
   try {
     const res = await authFetch(`/admin/accounts/${oauthModal.value.accountId}/checklogin`, {
       method: 'POST',
@@ -1597,24 +1633,55 @@ const doCheckLogin = async () => {
     });
     const data = await res.json();
     if (res.status === 202 && data.pending) {
-      errorMessage.value = data.message || '您尚未在浏览器完成授权，请先打开授权链接完成验证后再点击确认。';
+      oauthModalNotice.value = data.message || '您尚未在浏览器完成授权，请先打开授权链接完成验证后再点击确认。';
       return;
     }
     if (res.ok && data.success) {
       const seconds = data.elapsedMs ? `，耗时 ${(data.elapsedMs / 1000).toFixed(1)} 秒` : '';
       successMessage.value = `账号 "${oauthModal.value.accountName}" 授权成功${seconds}`;
       oauthModal.value.show = false;
+      oauthModalNotice.value = '';
       await fetchAccounts();
     } else {
-      // 授权失败：关闭弹窗但保留账号（用户可在账号列表里点"重新授权"）
-      errorMessage.value = data.error || '授权确认失败，请重试。';
-      oauthModal.value.show = false;
+      oauthModalNotice.value = data.error || '授权确认失败，请重试。';
       await fetchAccounts();
     }
   } catch (e: any) {
-    errorMessage.value = '授权确认失败: ' + e.message;
+    oauthModalNotice.value = '授权确认失败: ' + e.message;
   } finally {
     checkLoginLoading.value = false;
+  }
+};
+
+const importCurrentCliLogin = async () => {
+  if (!oauthModal.value.accountId) return;
+  manualImportLoading.value = true;
+  errorMessage.value = '';
+  oauthModalNotice.value = '';
+  try {
+    const res = await authFetch(`/admin/accounts/${oauthModal.value.accountId}/import-current-login`, {
+      method: 'POST',
+      body: JSON.stringify({ manualOutput: manualLoginOutput.value })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      const seconds = data.elapsedMs ? `，耗时 ${(data.elapsedMs / 1000).toFixed(1)} 秒` : '';
+      successMessage.value = `账号 "${oauthModal.value.accountName}" 已导入当前 CLI 登录态${seconds}`;
+      oauthModal.value.show = false;
+      manualLoginOutput.value = '';
+      oauthModalNotice.value = '';
+      await fetchAccounts();
+    } else {
+      if (data.account) {
+        const index = accounts.value.findIndex((a: any) => a.id === oauthModal.value.accountId);
+        if (index !== -1) accounts.value[index] = { ...accounts.value[index], ...data.account };
+      }
+      oauthModalNotice.value = data.error || '导入当前 CLI 登录态失败';
+    }
+  } catch (e: any) {
+    oauthModalNotice.value = '导入当前 CLI 登录态失败: ' + e.message;
+  } finally {
+    manualImportLoading.value = false;
   }
 };
 
@@ -2268,7 +2335,7 @@ onMounted(() => {
             </div>
             <div v-if="createAccountModal.error" class="bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-xl text-sm">{{ createAccountModal.error }}</div>
           </div>
-          <div class="px-6 pb-6 flex gap-3">
+          <div class="px-6 pb-6 flex flex-col sm:flex-row gap-3">
             <button type="button" @click="createAccountModal.show = false" :disabled="loading" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 disabled:opacity-50 transition">取消</button>
             <button type="submit" :disabled="loading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
               {{ loading ? '创建中...' : '创建并获取授权' }}
@@ -2279,7 +2346,7 @@ onMounted(() => {
 
       <!-- OAuth Device Flow 授权弹窗 -->
       <div v-if="oauthModal.show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[92vh] overflow-y-auto">
           <!-- 头部 -->
           <div class="px-6 pt-6 pb-4 border-b border-slate-100">
             <div class="flex items-center justify-between">
@@ -2324,14 +2391,40 @@ onMounted(() => {
                 <span class="text-base font-black tracking-[0.2em] text-amber-800 font-mono select-all break-all">{{ oauthModal.userCode }}</span>
               </div>
             </div>
+
+            <div class="rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white">
+                <span class="text-xs font-semibold text-slate-600">Headless 原始返回</span>
+                <button @click="nativeCopy(oauthHeadlessOutputText())" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-50 transition">复制</button>
+              </div>
+              <pre class="text-xs font-mono text-slate-700 px-3 py-3 max-h-36 overflow-auto whitespace-pre-wrap break-all">{{ oauthHeadlessOutputText() }}</pre>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white overflow-hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50">
+                <span class="text-xs font-semibold text-slate-600">手动确认命令</span>
+                <button @click="nativeCopy(manualCheckLoginCommand())" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800 px-2 py-0.5 rounded hover:bg-indigo-50 transition">复制</button>
+              </div>
+              <code class="block text-xs font-mono text-slate-700 px-3 py-3 break-all">{{ manualCheckLoginCommand() }}</code>
+              <div class="border-t border-slate-100 p-3 space-y-2">
+                <textarea v-model="manualLoginOutput" rows="4" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-indigo-500 resize-y" placeholder="可粘贴手动 checklogin 的完整输出；留空也可以直接导入当前 CLI 登录态"></textarea>
+                <p class="text-xs text-slate-400 leading-5">在同一台服务器、同一 Windows 用户下手动跑完上面的命令后，点下面的导入按钮。粘贴内容用于留痕，实际 token 从本机 CLI 登录态读取。</p>
+              </div>
+            </div>
           </div>
 
           <!-- 底部按钮 -->
+          <div v-if="oauthModalNotice" class="mx-6 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 whitespace-pre-wrap break-words">
+            {{ oauthModalNotice }}
+          </div>
           <div v-if="checkLoginLoading" class="px-6 pb-3 text-xs text-amber-600">正在调用即梦 CLI 确认授权，通常几秒内返回。未完成网页授权时不会长时间卡住。</div>
           <div class="px-6 pb-6 flex gap-3">
             <button @click="closeOAuthModal" class="flex-1 border border-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 transition">取消</button>
             <button @click="doCheckLogin" :disabled="checkLoginLoading" class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
               {{ checkLoginLoading ? '确认授权中...' : '我已完成授权' }}
+            </button>
+            <button @click="importCurrentCliLogin" :disabled="manualImportLoading" class="flex-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition">
+              {{ manualImportLoading ? '导入中...' : '导入 CLI 登录态' }}
             </button>
           </div>
         </div>

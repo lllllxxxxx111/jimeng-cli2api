@@ -49,7 +49,8 @@ try {
 }
 `;
 
-  const clearReg = `Remove-Item -Path '${REG_KEY_PATH.replace(/\\/g, '\\')}' -Recurse -Force -ErrorAction SilentlyContinue
+  const clearReg = `New-Item -Path '${REG_KEY_PATH.replace(/\\/g, '\\')}' -Force | Out-Null
+Remove-ItemProperty -Path '${REG_KEY_PATH.replace(/\\/g, '\\')}' -Name '${REG_VAL_NAME}' -Force -ErrorAction SilentlyContinue
 exit 0
 `;
 
@@ -99,6 +100,15 @@ export async function clearRegToken(): Promise<void> {
       `powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "${PS_CLEAR_REG}"`
     );
   } catch {} // 不存在时忽略
+}
+
+/** 重新授权前：删除账号目录里的旧注册表 token 备份，防止后续确认授权前恢复坏 token */
+export function deleteRegTokenBackup(accountHomeDir: string): void {
+  if (process.platform !== 'win32') return;
+  const tokenFile = path.join(path.resolve(accountHomeDir), REG_TOKEN_RELATIVE);
+  try {
+    if (fs.existsSync(tokenFile)) fs.unlinkSync(tokenFile);
+  } catch {}
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -173,6 +183,18 @@ function resolveDreaminaCommand(command: string): { file: string; args: string[]
     throw new Error('Invalid CLI command: only dreamina commands are allowed');
   }
   return { file: DREAMINA_BIN, args: parsed.slice(1) };
+}
+
+function formatCliExecError(error: any): string {
+  const details = [
+    `message: ${error?.message || 'unknown error'}`,
+    `exitCode: ${error?.code ?? 'unknown'}`,
+    `signal: ${error?.signal ?? 'none'}`,
+    `killed: ${error?.killed === true ? 'true' : 'false'}`,
+    `stderr: ${error?.stderr || ''}`,
+    `stdout: ${error?.stdout || ''}`,
+  ];
+  return details.join('\n');
 }
 
 /**
@@ -339,7 +361,8 @@ export const runJimengCommand = async (
   accountHomeDir?: string,
   saveBackup: boolean = false,
   timeoutMs: number = 1000 * 60 * 5,
-  onPhase?: (phase: CliRunPhase) => void
+  onPhase?: (phase: CliRunPhase) => void,
+  tokenMode: 'restore' | 'clear' | 'none' = 'restore'
 ): Promise<CliRunResult> => {
   const resolvedCommand = resolveDreaminaCommand(command);
 
@@ -376,15 +399,15 @@ export const runJimengCommand = async (
   // 有 accountHomeDir 时，先换入该账号的 credential 再执行
   if (accountHomeDir) {
     try {
-      return await withCredSwap(accountHomeDir, runFn, 'restore', onPhase);
+      return await withCredSwap(accountHomeDir, runFn, tokenMode, onPhase);
     } catch (error: any) {
-      throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+      throw new Error(`CLI 执行失败:\n${formatCliExecError(error)}`);
     }
   }
   try {
     return await runFn();
   } catch (error: any) {
-    throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+    throw new Error(`CLI 执行失败:\n${formatCliExecError(error)}`);
   }
 };
 
@@ -414,6 +437,6 @@ export const runJimengCommandInSwap = async (
     });
     return { stdout, stderr };
   } catch (error: any) {
-    throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+    throw new Error(`CLI 执行失败:\n${formatCliExecError(error)}`);
   }
 };

@@ -7,6 +7,7 @@ exports.runJimengCommandInSwap = exports.runJimengCommand = exports.DREAMINA_BIN
 exports.saveRegToken = saveRegToken;
 exports.restoreRegToken = restoreRegToken;
 exports.clearRegToken = clearRegToken;
+exports.deleteRegTokenBackup = deleteRegTokenBackup;
 exports.withCredSwap = withCredSwap;
 exports.withMutex = withMutex;
 exports.clearRealCredential = clearRealCredential;
@@ -58,7 +59,8 @@ try {
   exit 1
 }
 `;
-    const clearReg = `Remove-Item -Path '${REG_KEY_PATH.replace(/\\/g, '\\')}' -Recurse -Force -ErrorAction SilentlyContinue
+    const clearReg = `New-Item -Path '${REG_KEY_PATH.replace(/\\/g, '\\')}' -Force | Out-Null
+Remove-ItemProperty -Path '${REG_KEY_PATH.replace(/\\/g, '\\')}' -Name '${REG_VAL_NAME}' -Force -ErrorAction SilentlyContinue
 exit 0
 `;
     fs_1.default.writeFileSync(PS_SAVE_REG, saveReg, 'utf8');
@@ -102,6 +104,17 @@ async function clearRegToken() {
         await execAsync(`powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "${PS_CLEAR_REG}"`);
     }
     catch { } // 不存在时忽略
+}
+/** 重新授权前：删除账号目录里的旧注册表 token 备份，防止后续确认授权前恢复坏 token */
+function deleteRegTokenBackup(accountHomeDir) {
+    if (process.platform !== 'win32')
+        return;
+    const tokenFile = path_1.default.join(path_1.default.resolve(accountHomeDir), REG_TOKEN_RELATIVE);
+    try {
+        if (fs_1.default.existsSync(tokenFile))
+            fs_1.default.unlinkSync(tokenFile);
+    }
+    catch { }
 }
 /**
  * 解析 dreamina 可执行文件路径：
@@ -161,6 +174,17 @@ function resolveDreaminaCommand(command) {
         throw new Error('Invalid CLI command: only dreamina commands are allowed');
     }
     return { file: exports.DREAMINA_BIN, args: parsed.slice(1) };
+}
+function formatCliExecError(error) {
+    const details = [
+        `message: ${error?.message || 'unknown error'}`,
+        `exitCode: ${error?.code ?? 'unknown'}`,
+        `signal: ${error?.signal ?? 'none'}`,
+        `killed: ${error?.killed === true ? 'true' : 'false'}`,
+        `stderr: ${error?.stderr || ''}`,
+        `stdout: ${error?.stdout || ''}`,
+    ];
+    return details.join('\n');
 }
 /**
  * Windows 上 CLI 的 credential.json 始终写入真实用户 home 目录，无视 USERPROFILE 环境变量。
@@ -308,7 +332,7 @@ function generateFreshCredential(accountHomeDir) {
  * 核心调度器：使用独立的环境变量 HOME/USERPROFILE 欺骗 CLI 去隔离文件夹中读取数据
  * 同时通过 withCredSwap 保证每次执行时使用正确账号的 credential.json
  */
-const runJimengCommand = async (command, accountHomeDir, saveBackup = false, timeoutMs = 1000 * 60 * 5, onPhase) => {
+const runJimengCommand = async (command, accountHomeDir, saveBackup = false, timeoutMs = 1000 * 60 * 5, onPhase, tokenMode = 'restore') => {
     const resolvedCommand = resolveDreaminaCommand(command);
     const env = { ...process.env };
     if (accountHomeDir) {
@@ -341,17 +365,17 @@ const runJimengCommand = async (command, accountHomeDir, saveBackup = false, tim
     // 有 accountHomeDir 时，先换入该账号的 credential 再执行
     if (accountHomeDir) {
         try {
-            return await withCredSwap(accountHomeDir, runFn, 'restore', onPhase);
+            return await withCredSwap(accountHomeDir, runFn, tokenMode, onPhase);
         }
         catch (error) {
-            throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+            throw new Error(`CLI 执行失败:\n${formatCliExecError(error)}`);
         }
     }
     try {
         return await runFn();
     }
     catch (error) {
-        throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+        throw new Error(`CLI 执行失败:\n${formatCliExecError(error)}`);
     }
 };
 exports.runJimengCommand = runJimengCommand;
@@ -379,7 +403,7 @@ const runJimengCommandInSwap = async (command, accountHomeDir) => {
         return { stdout, stderr };
     }
     catch (error) {
-        throw new Error(`CLI 执行失败: ${error.message}\nStderr: ${error.stderr}\nStdout: ${error.stdout}`);
+        throw new Error(`CLI 执行失败:\n${formatCliExecError(error)}`);
     }
 };
 exports.runJimengCommandInSwap = runJimengCommandInSwap;
